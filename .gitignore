@@ -2,6 +2,9 @@ node_modules/
 package-lock.json
 
 # The MegaMUD database this is built from: 12 MB of third-party binary that
-# does not belong in source control. Fetch it with the command in the README
-# and run build_db.py to regenerate data/gamedata.js.
+# does not belong in source control. ./init.sh fetches it and regenerates
+# data/gamedata.js, which is committed.
 *.mdb
+
+# created by init.sh
+.venv/

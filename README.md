@@ -6,14 +6,55 @@ equipment that character can actually wear.
 
 Everything runs locally in the browser — no server, no build step, no network.
 
+## Quick start
+
+```bash
+./init.sh --serve
+```
+
+Then open <http://localhost:8000>. That is all it takes from a fresh clone.
+
+`init.sh` fetches the game database, generates the data file the page loads, and
+runs the test suite. It is safe to re-run and skips anything already done:
+
+| | |
+|---|---|
+| `./init.sh` | fetch if missing, then build |
+| `./init.sh --serve` | build, then serve on <http://localhost:8000> |
+| `./init.sh --force` | re-download even if the database is already here |
+| `./init.sh path/to.mdb` | build from an `.mdb` you already have |
+
+Its only dependency is Python's `access-parser`. If your Python already has it,
+the script uses it; otherwise it creates a local `.venv` rather than touching
+your system Python. `node` is used only for the tests and is optional.
+
+### The game database
+
+The repository does not carry the MegaMUD database itself — it is 12 MB of
+third-party binary, and `data/gamedata.js` (the export the page actually loads)
+is committed instead. `init.sh` pulls it from
+[Tehshortbus/Majormud_MDB_Repo](https://github.com/Tehshortbus/Majormud_MDB_Repo),
+which mirrors the MegaMUD `.mdb` files:
+
+```
+https://github.com/Tehshortbus/Majormud_MDB_Repo/raw/refs/heads/main/data-v1.11p.mdb
+```
+
+The shipped data was built from `data-v1.11p.mdb` (dat `v1.11p`, nmr `v1.8.3`,
+sha256 `eba20f06…`), 1,950 items. `init.sh` checks that hash and tells you when
+your file is a different build — not an error, just worth knowing, since the
+export will then describe your database rather than the one documented here.
+
 ## Using it
+
+Once the data is generated you can also just serve the directory yourself:
 
 ```bash
 python3 -m http.server 8000
 ```
 
-Then open <http://localhost:8000>. Opening `index.html` directly from disk works
-too; the data is loaded as a plain `<script>`, not via `fetch`, so `file://` is fine.
+Opening `index.html` directly from disk works too; the data is loaded as a plain
+`<script>`, not via `fetch`, so `file://` is fine.
 
 1. **Character** — paste the output of `stat` and `inv` (both together is fine)
    and press *Parse*. Class, race, level, stats, coins, worn equipment and carried
@@ -172,15 +213,8 @@ pip install access-parser
 python3 build_db.py path/to/your.mdb
 ```
 
-The shipped `data/gamedata.js` was built from `data-v1.11p.mdb` (dat `v1.11p`,
-nmr `v1.8.3`), 1,950 items. That source file is not in the repository — it is
-12 MB of third-party binary, and the generated data is what the app actually
-loads. To get it back:
-
-```bash
-curl -LO https://github.com/Tehshortbus/Majormud_MDB_Repo/raw/refs/heads/main/data-v1.11p.mdb
-python3 build_db.py data-v1.11p.mdb
-```
+`./init.sh` does both of those steps for you, including fetching the database —
+see [The game database](#the-game-database) above for where it comes from.
 
 ## Tests
 
