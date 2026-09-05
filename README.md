@@ -71,7 +71,168 @@ Opening `index.html` directly from disk works too; the data is loaded as a plain
    encumbrance — but class, level and alignment still have to be set by hand.
 2. **Optimize** — pick a goal, pick how much of the game you want to draw from,
    and press *Optimize*.
-3. **Browse Items** — the whole item table, filtered to what your character can use.
+3. **Spells** — every spell your class can learn, with its numbers worked out at
+   your level.
+4. **Browse Items** — the whole item table, filtered to what your character can use.
+
+### Swings, round by round
+
+Combat is fought in rounds. Each round hands you 1,000 energy **on top of
+whatever was left over**, and you swing as many times as that pays for. So a
+weapon worth "2.5 swings" does not land two and a half every round — it lands
+2, 3, 2, 3. The algorithm is the one quoted in MME's swing calculator:
+
+```pascal
+Temp := 1000;
+repeat
+  I    := Temp div EU;
+  Temp := (Temp mod EU) + 1000;
+  If (I > MAX_SWINGS) Then I := MAX_SWINGS;   { MAX_SWINGS = 5 }
+until False
+```
+
+Note the order: the carry is taken from the *uncapped* division, so a very fast
+weapon still burns all its energy but never lands more than five swings.
+
+Weapons are scored on the swings they actually get over the opening **five
+rounds**, because most fights are over by then, and a rate you would only reach
+in a long fight is not worth optimising for. *Fight length* on the Optimize tab
+changes that horizon — 3, 5, 8 or 12 rounds — and it does change which weapon
+wins.
+
+This is not a cosmetic difference. Two weapons for the same level-24 Warrior:
+
+| | energy | continuous rate | actual swings | damage/round |
+| --- | --- | --- | --- | --- |
+| obsidian trident | 385 | 2.60 swings | 2, 3, 2, 3, 2 = 12 | 111.6 |
+| Magus Ripper | 410 | 2.44 swings | 2, 2, 3, 2, 3 = 12 | **116.4** |
+
+The rate says the trident is faster. Over five rounds they land exactly the same
+twelve swings, so the weapon that hits harder wins — the opposite of what the
+rate implies.
+
+The impact column reports this directly: heavy armour now costs you *swings*,
+not just an abstract rate. A spiked plate corselet reads **Swings in the fight
+−2** next to its AC gain.
+
+### Crits are paid for once
+
++Crits and +Max Damage both feed the damage model: crit chance multiplies your
+max damage by two to four, and +Max Damage is folded in *before* that multiplier.
+So they cannot also carry a flat scoring weight — a ring with +2 Crits would earn
+its flat weight *and* raise the weapon's damage per round on the next pass of the
+fixed point, and get paid twice for the same point.
+
+They are now priced through the damage model only, at their true marginal rate:
+
+```
+crit point   = swings/round × (critDamage − normalDamage) / 100 × slope
+maxdmg point = swings/round × ((1 − crit%) × 0.5 + 3 × crit%)
+```
+
+where `slope` is 1 below 40 crit, ⅓ above it (`critAfterDR`), and 0 at the 99
+cap. Both are exactly linear in the swing maths, so one rate values a point
+correctly wherever it is worn. A test moves the context by one point and checks
+the price matches the damage the model actually produces, to 1e-6.
+
+For a level-24 Warrior with throwing hammers that comes out at **3.5 damage a
+round per crit point** and **4.0 per point of +Max Damage** — against the flat
+weight of 40 the *Melee damage* preset used to apply. That distortion was large
+enough to invert a choice: a rapier's `+2 Crits` beat throwing hammers despite
+doing 17 less damage a round. It no longer does.
+
+The `crits` and `maxdmg` weight boxes still work, and still apply **when there is
+no weapon to price them against** — a bare-handed martial artist keeps his crit
+gear, which is why the *Martial arts* preset is the one that still carries them.
+Martial-arts damage itself is not modelled.
+
+Two smaller overlaps are left alone deliberately. `str` and `agi` carry flat
+weights while also feeding encumbrance, energy, dodge and accuracy — but there
+their flat weight is standing in for effects that are not otherwise scored per
+item, so removing it would lose signal rather than stop a double count.
+
+### Where an item comes from
+
+A lot of the best gear is never sold anywhere — you take it off something. Every
+item now carries its drop table, so the results say **which monster drops it, at
+what chance, and where that monster lives**:
+
+```
+hellblade    18-40 dmg   limited 1 · lvl 50+ · evil only
+
+  Dropped by 1 monster:
+  - Devil Fiend Malivek (10%), 60,000 exp, 4,500 hp
+      map 15 (extreme) — Diamond Mine Tunnel
+```
+
+525 items have a drop source, 167 of them weapons, off 421 monsters. It matters
+further down the level range than you might expect: a plain **gold ring** is not
+sold in any shop in the game.
+
+The *Where to get it* column leads with a shop price when there is one — that is
+the route you control — and names the best drop otherwise. An item that is both
+sold and dropped keeps both in its tooltip. Where several monsters drop the same
+thing, the one named is the best chance, and among equal chances the weakest
+monster carrying it.
+
+The **What I own + shops + monster drops** item pool adds anything with a drop
+source to the search. Your purse does not gate those, because there is no price
+on them; the trade is that you have to go and take them, and the tooltip tells
+you what you would be fighting.
+
+Two things about the location data:
+
+- A monster's whereabouts come from two different room columns. `Rooms.NPC` is
+  the one monster fixed to a room; `Rooms.Lair` is a `(Max 3): 827,925,926` list
+  of everything that can lair there. Using both locates 357 of the 421 dropping
+  monsters, against 336 from `NPC` alone. The rest say *location unknown* rather
+  than guessing.
+- Those lair lists are deliberately **not** fed into the map difficulty tiers
+  that drive the shop filter. They name every wanderer passing through, which
+  drowns the median: fold them in and map 12 falls from a median of 45,000 exp
+  to 55 and reads as a starter zone, which it certainly is not.
+
+A `0%` drop row is treated as no source at all — the monster is listed but never
+actually drops it.
+
+### The spell calculator
+
+The Spells tab takes a class, a level, your Spellcasting and any worn +Spell Dmg,
+and shows what each spell actually does for that caster: damage or healing range,
+duration in rounds, mana cost, damage per mana, chance to cast, and what the spell
+does besides damage. It follows the active character automatically until you
+change one of the boxes yourself; *Use my character* hands it back.
+
+The numbers are not the raw database values. Every spell has its own level band,
+and the caster's level is clamped into it before anything scales:
+
+- a spell never scales below its **required level** — a level-3 spell cast at
+  level 1 still uses its level-3 numbers;
+- it stops improving at its **cap** — magic missile is capped at 6, so it is
+  4–12 damage at level 6 and at level 60 alike;
+- increments are **truncated, not rounded** — `+1 per 10 levels` is +2 at level
+  29, not +3.
+
+Hover a spell's name for its scaling rule in words (*"max +1 / level, stops at
+level 6"*), and a cast percentage for how it was worked out.
+
+A few things worth knowing, all taken from the game's own behaviour:
+
+- **Difficulty adjusts your Spellcasting; it is not a target number.**
+  Spellcasting 88 against difficulty +15 is a 98% cast. Stock MajorMUD caps spell
+  hit at 98%; Kai is the exception and caps at 100.
+- **Cheap spells go off more than once a round.** A spell costing between 143 and
+  500 energy casts `1 + (1000 − cost) / cost` times, so a 200-energy spell lands
+  five times a round. That is folded into the damage column.
+- **+Spell Dmg applies to damage, not healing.** Stock MajorMUD only bonuses the
+  damage side; the heal half of a drain is unbonused. It multiplies after level
+  scaling and truncates.
+- **Only spells a class can actually learn are listed.** The table also holds
+  around 1,100 monster attacks and item procs. Without the learnability test a
+  Warrior "knows" 849 spells; with it, a Warrior knows none, which is right.
+
+Message and bookkeeping abilities (*DescMsg 8531*, *RemovesSpell 132*) are hidden.
+They are real, but they crowd out the effects you are choosing between.
 
 ### What a swap is actually worth
 
@@ -174,13 +335,14 @@ This is a heuristic over monster placement, not a route calculation — it canno
 know that one corner of map 1 is lethal. Treat it as a starting point and switch
 off individual shops you know you cannot reach.
 
-### The three item pools
+### The four item pools
 
 | Pool | What it considers |
 | --- | --- |
 | Everything in the game | Every item you are eligible for, however you would get it |
 | Only what I own | Just what you have equipped or in your pack — a pure re-shuffle |
 | What I own + can afford | Adds shop stock you could pay for right now |
+| What I own + shops + drops | Adds anything a monster drops, priced in effort rather than coin |
 
 ### Encumbrance
 
@@ -222,9 +384,10 @@ see [The game database](#the-game-database) above for where it comes from.
 node test/run.js
 ```
 
-175 assertions covering the formulas, the paste parser, the eligibility rules,
-the optimizer's invariants, the per-swap impact maths and the character roster's
-save/restore round trip.
+292 assertions covering the formulas, the paste parser, the eligibility rules,
+the optimizer's invariants, the per-round swing schedule, the marginal pricing of
+crits, the per-swap impact maths, the spell scaling and cast chance, the drop
+tables and their locations, and the character roster's save/restore round trip.
 
 ## How the database was decoded
 
@@ -242,9 +405,16 @@ long-standing community database viewer for this format:
 | Class / level / alignment gating | `frmMain.ItemIsUsableByChar` |
 | Encumbrance, dodge, accuracy formulas | `modMMudFunc` |
 | Swing energy, crit chance and crit damage | `modMMudFunc.CalcEnergyUsed`, `CalcQuickAndDeadlyBonus` |
+| Swings per round and the 5-swing cap | `frmSwingCalc.CalcSwings` (and the Pascal it quotes), `modMMudFunc.MAX_SWINGS` |
 | Coin denominations | `frmCoinConvert` |
 | Shop pricing (markup and Charm) | `modMMudDatabase.GetItemValue` |
 | Shop type / trainer level range | `modMMudFunc.GetShopTypeEnum`, `modMain` |
+| Monster drop tables and chances | `Monsters.DropItem-N` / `DropItem%-N`, `modMain` |
+| Spell damage / duration scaling | `modMMudDatabase.GetCurrentSpellMinMax`, `GetSpellMinDamage`, `GetSpellDuration` |
+| Spell effect rendering | `modMMudDatabase.PullSpellEQ` |
+| Cast chance and its cap | `modMMudFunc.GetSpellCastChance`, `STOCK_SPELL_HIT_CAP` |
+| Which class can learn which spell | `modMMudFunc.SpellIsUsable`, `SpellIsInGame` |
+| Magery / target / attack-type enums | `modMMudFunc.GetMageryEnum`, `SpellAttackTypeEnum`, `modMain` |
 
 Things worth knowing, all of which the tool handles:
 
@@ -256,6 +426,14 @@ Things worth knowing, all of which the tool handles:
   optimizer scores non-stacking accuracy additively as an approximation — those
   values are marked with `*` in the results — but the totals row applies the
   real max-of-one rule.
+- **A spell's `Classes` column is a string, not a bitmask** — `(*)` for any
+  class, or `(12)` for a specific one. It is a restriction on the *learning
+  method* and applies on top of the magery school, not instead of it.
+- **`MinBase` is not always damage.** For a spell whose damage abilities are
+  absent, the min/max range is the magnitude of whatever ability has a zero
+  value: `illuminate`'s 4012 is a text-block number, `ethereal shield`'s 3 is its
+  AC. Only abilities 1, 8 and 17 make a spell a damage spell (18 and 8 make it a
+  heal), which is what `GetSpellMinDamage` scans for.
 - **Rings use two different `Worn` codes** (4 and 13) which both feed the same
   pair of finger slots. Wrists work the same way. The solver treats each pair as
   one group so it can never put the same ring on both hands.

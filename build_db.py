@@ -164,6 +164,42 @@ ALIGN_NOT  = {110: "good", 111: "evil", 113: "neutral"}
 JUNK = (8224,)   # 0x2020 -- unset padding in the AbilVal columns
 
 
+# ---------------------------------------------------------------- spells
+
+# modMMudFunc.GetMageryEnum
+MAGERY_NAMES = {0: "None", 1: "Mage", 2: "Priest", 3: "Druid", 4: "Bard", 5: "Kai"}
+
+# modMain.AddSpell2LV (the Select Case over Targets)
+SPELL_TARGETS = {
+    0: "User", 1: "Self", 2: "Self or user", 3: "Divided area (not self)",
+    4: "Monster", 5: "Divided area (incl. self)", 6: "Any", 7: "Item",
+    8: "Monster or user", 9: "Divided attack area", 10: "Divided party area",
+    11: "Full area", 12: "Full attack area", 13: "Full party area",
+}
+
+# modMMudFunc.SpellAttackTypeEnum
+SPELL_ATT_TYPES = {
+    0: "Cold", 1: "Fire", 2: "Stone", 3: "Lightning",
+    4: "Normal", 5: "Water", 6: "Poison",
+}
+
+# modMain: TypeOfResists, nmr >= 1.8
+SPELL_RESISTS = {
+    0: "Cannot be fully resisted",
+    1: "Fully resistable by anti-magic only",
+    2: "Fully resistable by all",
+}
+
+# GetSpellMinDamage / GetSpellMaxDamage scan Abil-0..9 for these.
+SPELL_DAMAGE_ABILS = {1, 8, 17}     # 1 damage, 8 drain life, 17 damage vs MR
+SPELL_HEAL_ABILS = {8, 18}          # 8 drains into a heal, 18 heals outright
+SPELL_ENDCAST_ABIL = 151            # chains into another spell
+
+# SpellIsUsable: alignment gates carried as abilities.
+SPELL_ALIGN_IS = {97: "good", 98: "evil", 112: "neutral"}
+SPELL_ALIGN_NOT = {110: "good", 111: "evil", 113: "neutral"}
+
+
 def rows_of(db, table):
     tb = db.parse_table(table)
     cols = list(tb.keys())
@@ -357,16 +393,42 @@ def main():
     # whether a low-level character can physically reach a shop.
     mon_exp = {}
     mtab = db.parse_table("Monsters")
-    for i in range(len(mtab["Number"])):
+    mrows = len(mtab["Number"])
+    for i in range(mrows):
         mon_exp[mtab["Number"][i]] = num(mtab["EXP"][i])
 
+    # Where a monster is found. Two different room columns say so, and they mean
+    # different things, so they are used for different jobs:
+    #
+    #   Rooms.NPC   the one monster fixed to that room
+    #   Rooms.Lair  "(Max 3): 827,925,926" -- everything that can lair there
+    #
+    # The map difficulty tier deliberately reads NPC only. Lair lists name every
+    # wanderer that passes through, so folding them in drowns the median in
+    # common trash: map 12 drops from a median of 45,000 exp to 55 and reads as
+    # a starter zone, which it very much is not. For *locating* a monster the
+    # lairs are exactly what you want, and they take the coverage from 336
+    # monsters to 889.
+    mon_maps = defaultdict(set)
+    mon_room = {}
     map_rooms, map_mobs = defaultdict(int), defaultdict(list)
     for i in range(len(rt["Map Number"])):
         mp = rt["Map Number"][i]
         map_rooms[mp] += 1
+        room_name = str(rt["Name"][i] or "").strip()
+
         npc = rt["NPC"][i]
         if isinstance(npc, int) and npc and mon_exp.get(npc):
             map_mobs[mp].append(mon_exp[npc])
+
+        here = [npc] if isinstance(npc, int) and npc else []
+        lair = str(rt["Lair"][i] or "")
+        if lair:
+            here += [int(x) for x in re.findall(r"\d+", lair.split(":", 1)[-1])]
+        for mn_ in here:
+            if mn_ in mon_exp:
+                mon_maps[mn_].add(mp)
+                mon_room.setdefault(mn_, room_name)
 
     def tier_of(exp):
         if exp < 100:   return "starter"
@@ -399,6 +461,140 @@ def main():
             "tier": tier_of(med),
         })
 
+    # ------------------------------------------------------- monster drops
+    #
+    # Plenty of the best gear is never sold anywhere -- you take it off
+    # something. Monsters.DropItem-0..9 is the drop table and DropItem%-N the
+    # chance, as a plain percentage.
+    drop_of = defaultdict(list)          # item number -> [[monster, pct], ...]
+    for i in range(mrows):
+        mnum = int(num(mtab["Number"][i]))
+        for k in range(10):
+            d = int(num(mtab[f"DropItem-{k}"][i]))
+            pct = int(num(mtab[f"DropItem%-{k}"][i]))
+            # A 0% row is a dead entry -- the monster is listed but never drops
+            # it, so it is not a source. MME clamps the other end at 100.
+            if d and pct > 0:
+                drop_of[d].append([mnum, min(100, pct)])
+
+    item_nums = {it["n"] for it in items}
+    wanted_mons = set()
+    for it in items:
+        entries = drop_of.get(it["n"])
+        if not entries:
+            continue
+        # Best chance first: that is the one worth hunting.
+        entries.sort(key=lambda e: (-e[1], e[0]))
+        it["drop"] = entries
+        wanted_mons.update(e[0] for e in entries)
+
+    monsters = []
+    for i in range(mrows):
+        mnum = int(num(mtab["Number"][i]))
+        if mnum not in wanted_mons:
+            continue
+        where = sorted(mon_maps.get(mnum, ()))
+        monsters.append({
+            "n": mnum,
+            "name": str(mtab["Name"][i] or "").strip(),
+            "exp": int(num(mtab["EXP"][i])),
+            "hp": int(num(mtab["HP"][i])),
+            "ac": int(num(mtab["ArmourClass"][i])),
+            "mr": int(num(mtab["MagicRes"][i])),
+            "maps": where,
+            "room": mon_room.get(mnum, ""),
+            "inGame": bool(num(mtab["In Game"][i])),
+        })
+    monsters.sort(key=lambda m: m["n"])
+
+    # ------------------------------------------------------------- spells
+    #
+    # Only spells a player class can actually learn and cast are exported. The
+    # table also holds ~1,100 monster attacks and item procs; SpellIsUsable with
+    # bAndLearnable is what separates them, and without it a Warrior "knows" 849
+    # spells. Magery, learnability and the class-restriction string are settled
+    # here; ReqLevel and alignment stay in the browser, where they depend on the
+    # character rather than on the database.
+    # "v1.8.3" -> 1.8. MME only ever compares against 1.7 and 1.8.
+    m = re.search(r"(\d+)\.(\d+)", str(info.get("NMR Version") or "1.8"))
+    nmr = float(f"{m.group(1)}.{m.group(2)}") if m else 1.8
+
+    def spell_in_game(r):
+        """modMMudFunc.SpellIsInGame."""
+        if (num(r.get("Learnable")) == 0
+                and len(str(r.get("Learned From") or "")) <= 1
+                and len(str(r.get("Casted By") or "")) <= 1
+                and (num(r.get("Magery")) != 5 or num(r.get("ReqLevel")) < 1)):
+            return nmr >= 1.8 and len(str(r.get("Classes") or "")) > 1
+        return True
+
+    def spell_learnable(r):
+        """SpellIsUsable's bAndLearnable branch. Kai autolearns at ReqLevel."""
+        if (num(r.get("Learnable")) == 0
+                and len(str(r.get("Learned From") or "")) < 5
+                and (num(r.get("Magery")) != 5 or num(r.get("ReqLevel")) < 1)):
+            return False
+        return True
+
+    def spell_usable_by(r, cnum, magery, magery_lvl):
+        """SpellIsUsable, minus the ReqLevel and alignment tests."""
+        if not spell_in_game(r) or not spell_learnable(r):
+            return False
+        if num(r.get("Magery")) != 0:
+            if magery == 0 or magery != num(r.get("Magery")):
+                return False
+            if magery_lvl > 0 and magery_lvl < num(r.get("MageryLVL")):
+                return False
+            # Kai is the one school that grants spells without a teacher.
+            if magery != 5 and num(r.get("Learnable")) == 0:
+                return False
+        cs = str(r.get("Classes") or "")
+        if nmr >= 1.7 and len(cs) > 2 and cs != "(*)":
+            if f"({cnum})" not in cs:
+                return False
+        return True
+
+    spell_rows = [r for r in rows_of(db, "Spells") if str(r.get("Name") or "").strip()]
+    castable = {c["n"]: [] for c in classes}
+    for r in spell_rows:
+        for c in classes:
+            if spell_usable_by(r, c["n"], c["magery"], c["mageryLvl"]):
+                castable[c["n"]].append(int(num(r["Number"])))
+
+    keep = {n for lst in castable.values() for n in lst}
+    spells = []
+    for r in spell_rows:
+        n = int(num(r["Number"]))
+        if n not in keep:
+            continue
+        abils = [(int(num(r.get(f"Abil-{k}"))), int(num(r.get(f"AbilVal-{k}"))))
+                 for k in range(10) if num(r.get(f"Abil-{k}"))]
+        cs = str(r.get("Classes") or "")
+        spells.append({
+            "n": n,
+            "name": str(r.get("Name") or "").strip(),
+            "short": str(r.get("Short") or "").strip(),
+            "req": int(num(r.get("ReqLevel"))),
+            "mana": int(num(r.get("ManaCost"))),
+            "energy": int(num(r.get("EnergyCost"))),
+            "diff": int(num(r.get("Diff"))),
+            "cap": int(num(r.get("Cap"))),
+            # [base, increment, levels-per-increment]
+            "min": [int(num(r.get("MinBase"))), int(num(r.get("MinInc"))), int(num(r.get("MinIncLVLs")))],
+            "max": [int(num(r.get("MaxBase"))), int(num(r.get("MaxInc"))), int(num(r.get("MaxIncLVLs")))],
+            "dur": [int(num(r.get("Dur"))), int(num(r.get("DurInc"))), int(num(r.get("DurIncLVLs")))],
+            "magery": int(num(r.get("Magery"))),
+            "mlvl": int(num(r.get("MageryLVL"))),
+            "targets": int(num(r.get("Targets"))),
+            "att": int(num(r.get("AttType"))),
+            "res": int(num(r.get("TypeOfResists"))),
+            "learnable": int(num(r.get("Learnable"))),
+            "restrict": "*" if (cs == "(*)" or len(cs) <= 2) else [int(x) for x in re.findall(r"\d+", cs)],
+            "from": str(r.get("Learned From") or "").strip(),
+            "abils": abils,
+        })
+    spells.sort(key=lambda sp: (sp["req"], sp["n"]))
+
     payload = {
         "meta": {
             "source": os.path.basename(src),
@@ -424,6 +620,18 @@ def main():
         "items": items,
         "shops": shops,
         "maps": maps,
+        "monsters": monsters,
+        "spells": spells,
+        "castable": {str(k): v for k, v in castable.items() if v},
+        "mageryNames": MAGERY_NAMES,
+        "spellTargets": SPELL_TARGETS,
+        "spellAttTypes": SPELL_ATT_TYPES,
+        "spellResists": SPELL_RESISTS,
+        "spellDamageAbils": sorted(SPELL_DAMAGE_ABILS),
+        "spellHealAbils": sorted(SPELL_HEAL_ABILS),
+        "spellEndcastAbil": SPELL_ENDCAST_ABIL,
+        "spellAlignIs": SPELL_ALIGN_IS,
+        "spellAlignNot": SPELL_ALIGN_NOT,
     }
 
     js = os.path.join(outdir, "gamedata.js")
@@ -435,6 +643,12 @@ def main():
 
     print(f"wrote {js}  ({os.path.getsize(js)/1024:.0f} KB)")
     print(f"  items={len(items)}  classes={len(classes)}  races={len(races)}  shops={len(shops)}")
+    dropped = sum(1 for it in items if it.get("drop"))
+    print(f"  monsters={len(monsters)} that drop something; "
+          f"{dropped} items have a drop source, "
+          f"{sum(1 for it in items if it.get('drop') and it['type'] == 1)} of them weapons")
+    print(f"  spells={len(spells)} castable by a class "
+          f"(of {len(spell_rows)} in the table; the rest are monster/item spells)")
     print(f"  dat version={payload['meta']['datVersion']}  nmr={payload['meta']['nmrVersion']}")
 
 

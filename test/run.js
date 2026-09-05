@@ -24,7 +24,12 @@ vm.runInContext(
   'weaponProfile,calcQuickAndDeadly,critAfterDR,sumAbil,'+
   'snapshot,restore,blankState,newChar,switchChar,deleteChar,duplicateChar,'+
   'charLabel,activeChar,touch,getRoster:()=>roster,setRoster:r=>{roster=r},'+
-  'profileOf,setWith,swapGroups,swapImpact,IMPACT_ROWS,LOWER_IS_BETTER};', ctx);
+  'profileOf,setWith,swapGroups,swapImpact,IMPACT_ROWS,LOWER_IS_BETTER,'+
+  'spellAt,spellCastLevel,spellScale,spellCastChance,spellCastsPerRound,'+
+  'spellAlignOk,spellsFor,spellScalingText,spellByNum,'+
+  'bestDrop,dropTooltip,sourceText,monByNum,monLocText,candidatePool,'+
+  'swingSchedule,MAX_SWINGS,ENERGY_PER_ROUND,setRounds:n=>{fightRounds=n},'+
+  'getRounds:()=>fightRounds,damageMargins,DAMAGE_MODELLED,weaponThroughput};', ctx);
 
 const X = ctx.__X;
 const D = ctx.window.GAMEDATA;
@@ -492,6 +497,347 @@ const idx = k => X.IMPACT_ROWS.findIndex(r => r[0] === k);
 ok(idx('dps') < idx('ac') && idx('ac') < idx('hp'), 'impact rows are ordered by decisiveness');
 ok(headImp.rows.every(r => Math.abs(r.delta) >= (r.dp ? 0.05 : 0.5)),
    'rounding noise is not reported as an impact');
+
+/* ------------------------------------------------------------------ spells */
+section('Spell scaling (vs MMUD Explorer)');
+
+const spell = n => D.spells.find(sp => sp.name === n);
+
+// GetCurrentSpellMinMax / GetSpellDuration clamp the caster's level into the
+// spell's own band before anything scales off it.
+const mmis = spell('magic missile');   // req 1, cap 6
+eq(X.spellCastLevel(mmis, 20), 6, 'a level past the cap scales as if you were at the cap');
+eq(X.spellCastLevel(mmis, 0), 1, 'a level below the requirement scales at the requirement');
+eq(X.spellCastLevel(spell('ethereal shield'), 12), 12, 'a level inside the band is used as it is');
+
+// Fix() truncates, so a fractional increment is dropped rather than rounded.
+eq(X.spellScale([1, 1, 10], 29), 3, '+1 per 10 levels at level 29 is +2, not +3');
+eq(X.spellScale([60, 3, 1], 18), 114, '+3 per level compounds linearly');
+eq(X.spellScale([12, 0, 1], 40), 12, 'a zero increment never scales');
+eq(X.spellScale([12, 1, 0], 40), 12, '...and neither does a zero level step');
+
+// Values a player can check in game.
+const at = (name, lvl, sc, bonus) => X.spellAt(spell(name), lvl, sc || 0, bonus || 0);
+let a = at('magic missile', 20);
+eq(a.min, 4, 'magic missile stays 4 at any level (no min scaling)');
+eq(a.max, 12, '...and 12, because its max step is zero levels');
+ok(a.dmg && a.dmg.min === 4 && a.dmg.max === 12, 'ability 17 marks it as a damage spell');
+
+a = at('ethereal shield', 30);
+eq(a.castLevel, 18, 'ethereal shield caps at 18');
+eq(a.dur, 114, '60 + 3/level at the cap is 114 rounds');
+ok(a.effects.some(e => e === 'AC Blur +12'), 'its AC is the spell min/max, scaled', a.effects.join(' | '));
+ok(a.effects.some(e => e === 'DR 1'), 'a DR ability value is stored x10, exactly as on items');
+ok(!a.effects.some(e => /DescMsg|RemovesSpell/.test(e)), 'bookkeeping abilities are not shown');
+ok(a.capped, 'and the row knows it is capped');
+
+a = at('smite', 20);
+eq(a.dur, 100, 'smite lasts 60 + 2/level rounds');
+ok(a.effects.some(e => e === 'MaxDamage +3'), 'its +MaxDamage is 1 + 1 per 10 levels');
+ok(!a.dmg, 'a buff is not counted as a damage spell');
+
+// The worn +Spell Dmg bonus multiplies after level scaling, and truncates.
+a = at('turn undead', 30);
+eq(a.dmg.min, 32, 'turn undead at its cap is 12 + 20');
+eq(a.dmg.max, 75, '...to 15 + 3/level');
+a = at('turn undead', 30, 0, 25);
+eq(a.dmg.min, 40, '+25% spell damage takes the min to 40');
+eq(a.dmg.max, 93, '...and the max to 93, truncated not rounded');
+ok(a.bonused, 'and the row reports that the bonus was applied');
+
+// Stock MajorMUD bonuses damage but not healing; a drain is both.
+a = at('vampiric touch', 30, 0, 50);
+ok(a.dmg && a.heal, 'a drain both damages and heals');
+eq(a.dmg.min, 8, 'a drain does not take the +Spell Dmg bonus in stock MajorMUD');
+eq(a.heal.min, 8, '...on either side');
+
+/* ------------------------------------------------------- cast chance */
+section('Cast chance and casts per round');
+
+// GetSpellCastChance: Diff adjusts your Spellcasting; it is not a target number.
+eq(X.spellCastChance(mmis, 60), 75, 'Spellcasting 60 against difficulty +15 is 75%');
+eq(X.spellCastChance(mmis, 200), 98, 'stock MajorMUD caps spell hit at 98%');
+eq(X.spellCastChance(spell('way of the swan'), 200), 100, 'Kai caps at 100 instead');
+eq(X.spellCastChance(mmis, 0), 100, 'with no Spellcasting set the chance is not guessed at');
+ok(X.spellCastChance(spell('eldritch bolt'), 30) < X.spellCastChance(mmis, 30),
+   'a harder spell fails more often at the same Spellcasting');
+
+// A spell cheap enough in energy goes off more than once a round.
+eq(X.spellCastsPerRound(mmis), 1, 'a 1000-energy spell is one cast per round');
+eq(X.spellCastsPerRound(spell('eldritch fury')), 5, 'a 200-energy spell casts 5 times');
+eq(X.spellCastsPerRound(spell('meteor swarm')), 4, 'a 250-energy spell casts 4 times');
+eq(X.spellCastsPerRound(spell('magma blast')), 6, 'a 166-energy spell casts 6 times');
+eq(X.spellCastsPerRound(spell('ethereal shield')), 1,
+   'a spell that costs no energy is still one cast');
+eq(X.spellCastsPerRound({ energy: 600 }), 1,
+   'above 500 energy the multi-cast rule does not apply');
+eq(X.spellCastsPerRound({ energy: 100 }), 1, '...and neither does it below 143');
+
+/* --------------------------------------------------------- who can cast */
+section('Which class casts what');
+
+const cnum = n => D.classes.find(c => c.name === n).n;
+eq((D.castable[cnum('Warrior')] || []).length, 0, 'a Warrior casts nothing');
+eq((D.castable[cnum('Ninja')] || []).length, 0, '...and neither does a Ninja');
+ok(D.castable[cnum('Mage')].length > 50, 'a Mage has a real spell list',
+   String(D.castable[cnum('Mage')].length));
+ok(D.castable[cnum('Priest')].length > D.castable[cnum('Paladin')].length,
+   'higher magery level means more spells in the same school');
+
+// Magery school, not just level, decides the list.
+const mageList = new Set(D.castable[cnum('Mage')]);
+const priestList = new Set(D.castable[cnum('Priest')]);
+ok(!priestList.has(spell('magic missile').n), 'a Priest does not get Mage spells');
+ok(mageList.has(spell('magic missile').n), '...and a Mage does');
+
+// Level and alignment gate on top of that.
+const lvl5 = X.spellsFor(cnum('Mage'), 5, '0', { knownOnly: true });
+ok(lvl5.every(sp => sp.req <= 5), 'nothing above your level is offered as castable');
+ok(lvl5.length < X.spellsFor(cnum('Mage'), 100, '0', { knownOnly: true }).length,
+   'and the list grows as you level');
+
+const holy = spell('holy force');      // carries the NotEvil ability
+ok(X.spellAlignOk(holy, 'good'), 'a good character may cast holy force');
+ok(!X.spellAlignOk(holy, 'evil'), '...but an evil one may not');
+ok(X.spellAlignOk(holy, '0'), 'with no alignment set nothing is filtered out');
+ok(X.spellsFor(cnum('Priest'), 100, 'evil', {}).length <
+   X.spellsFor(cnum('Priest'), 100, '0', {}).length,
+   'an alignment costs an evil Priest some of the list');
+
+// The scaling rule is stated in words for the tooltip.
+ok(/stops at level 18/.test(X.spellScalingText(spell('ethereal shield'))),
+   'the scaling text names the cap', X.spellScalingText(spell('ethereal shield')));
+ok(/does not scale/.test(X.spellScalingText(spell('magic missile'))),
+   'and says so plainly when a spell does not scale');
+
+// A penalty reads as a penalty. PullSpellEQ only prefixes "+" to a positive.
+const curse = X.spellAt(spell('curse'), 22, 0, 0);
+ok(curse.effects.some(e => e === 'Accuracy -6'), 'a negative effect is not printed as "+-6"',
+   curse.effects.join(' | '));
+ok(X.spellAt(spell('bless'), 22, 0, 0).effects.some(e => e === 'Accuracy +3'),
+   '...while a bonus keeps its plus');
+
+/* ------------------------------------------------------------ monster drops */
+section('Where an item comes from');
+
+const monByNum = X.monByNum;
+
+// Every drop entry has to point at a monster that was actually exported, or the
+// tooltip would name "monster #412" at the player.
+let dropRows = 0, orphans = 0, badPct = 0;
+for (const i of D.items) {
+  if (!i.drop) continue;
+  for (const [mnum, pct] of i.drop) {
+    dropRows++;
+    if (!monByNum.has(mnum)) orphans++;
+    if (!(pct >= 1 && pct <= 100)) badPct++;
+  }
+}
+ok(dropRows > 500, 'the database carries a real drop table', String(dropRows));
+eq(orphans, 0, 'every drop names a monster that was exported');
+eq(badPct, 0, 'every drop chance is a plain percentage between 1 and 100');
+ok(D.items.filter(i => i.drop && i.type === 1).length > 150,
+   'weapons in particular have drop sources',
+   String(D.items.filter(i => i.drop && i.type === 1).length));
+
+// Drops are exported best-chance-first, and bestDrop agrees.
+for (const i of D.items) {
+  if (!i.drop || i.drop.length < 2) continue;
+  ok(i.drop[0][1] >= i.drop[1][1], 'drop lists lead with the best chance', i.name);
+  break;
+}
+const tieB = X.bestDrop({ drop: [[D.monsters[0].n, 5], [D.monsters[1].n, 5]] });
+ok(tieB.mon.exp <= Math.max(D.monsters[0].exp, D.monsters[1].exp),
+   'on an equal chance the weaker monster is the one named');
+
+// Earlier sections leave the shop filter narrowed; prices need it back.
+X.setEnabled(D.shops.map(sh => sh.n));
+
+// The item that caught a shop-pricing bug earlier: it is not sold anywhere.
+const hb = item('hellblade');
+eq(X.bestBuy(hb), null, 'the hellblade is not for sale in any shop');
+const hbd = X.bestDrop(hb);
+ok(hbd && hbd.mon.name === 'Devil Fiend Malivek', 'it drops off Devil Fiend Malivek',
+   hbd ? hbd.mon.name : 'nothing');
+eq(hbd.pct, 10, '...one time in ten');
+ok(/map 15/.test(X.monLocText(hbd.mon)), 'and the tooltip says where that monster lives',
+   X.monLocText(hbd.mon));
+const hbTip = X.dropTooltip(hb);
+ok(/Devil Fiend Malivek \(10%\)/.test(hbTip), 'the tooltip names the monster and the chance');
+ok(/60,000 exp/.test(hbTip), '...and how hard it is');
+eq(X.sourceText(hb).kind, 'drop', 'an unsold item reports a drop source, not a price');
+// An item you can both buy and kill for leads with the price -- that is the
+// route you control -- but keeps the drop in its tooltip.
+const dual = item('chainmail hauberk');
+ok(X.bestBuy(dual) && dual.drop && dual.drop.length, 'the chainmail hauberk is both sold and dropped');
+eq(X.sourceText(dual).kind, 'shop', '...and the cheaper certainty, the shop, is what it leads with');
+ok(X.dropTooltip(dual).length > 0, '...while the drop route is still described');
+eq(X.sourceText(item('scroll of blight')).kind, 'shop', 'a sold-only item reports its price');
+// The plain gold ring is not sold anywhere, which is the sort of thing this
+// feature exists to surface.
+eq(X.sourceText(item('gold ring')).kind, 'drop', 'even a basic gold ring is drop-only');
+
+// Location coverage: Rooms.Lair matters, not just Rooms.NPC.
+const located = D.monsters.filter(m => m.maps && m.maps.length).length;
+ok(located > 340, 'most dropping monsters have a known location',
+   `${located} of ${D.monsters.length}`);
+
+// Feeding lair lists into the map difficulty tiers would wreck them, so they
+// are deliberately built from Rooms.NPC alone. Guard that.
+const mapTier = n => (D.maps.find(m => m.n === n) || {}).tier;
+eq(mapTier(1), 'starter', 'map 1 is still the starter zone');
+eq(mapTier(12), 'extreme', 'map 12 is still extreme, not drowned in wandering trash');
+eq(mapTier(7), 'moderate', 'and the middle of the range is unchanged too');
+
+/* ---------------------------------------------------------- the drop pool */
+section('The obtainable item pool');
+
+// A broke character who could actually wield the drop-only item being checked:
+// the hellblade is evil-only, cursed, limited and level 50.
+S.coins = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
+S.equipped = {}; S.carried = [];
+S.cls = D.classes.find(c => c.name === 'Warrior').n;
+S.level = 60; S.align = 'evil';
+const poolOpt = { allowLimited: true, allowCursed: true, requireInGame: false };
+const buyable = X.candidatePool('buyable', poolOpt);
+const obtainable = X.candidatePool('obtainable', poolOpt);
+ok(obtainable.length > buyable.length,
+   'allowing drops widens the pool beyond what a broke character can buy',
+   `${obtainable.length} vs ${buyable.length}`);
+ok(!buyable.some(i => i.n === hb.n), 'a drop-only item is not in the buyable pool');
+ok(obtainable.some(i => i.n === hb.n), '...but is in the obtainable one');
+ok(X.candidatePool('all', poolOpt).length >= obtainable.length,
+   'and everything-in-the-game is still the widest pool');
+
+/* --------------------------------------------------------- swings a round */
+section('Swings, round by round');
+
+// The Pascal quoted in MME's frmSwingCalc:
+//   Temp := 1000; I := Temp div EU; Temp := (Temp mod EU) + 1000;
+// Leftover energy carries, so a "2.5 swing" weapon really lands 2, 3, 2, 3.
+const sched = (eu, n) => X.swingSchedule(eu, n).join(',');
+eq(sched(400, 6), '2,3,2,3,2,3', 'a 2.5-swing weapon alternates 2 and 3, it does not average');
+eq(sched(1000, 4), '1,1,1,1', 'a 1000-energy weapon is exactly one swing a round');
+eq(sched(250, 4), '4,4,4,4', 'an exact divisor never drifts');
+eq(sched(333, 4), '3,3,3,3', '3.003 swings is three a round, not four');
+eq(sched(1054, 5), '0,1,1,1,1', 'a weapon costing more than a round of energy whiffs round one');
+eq(sched(2100, 5), '0,0,1,0,1', '...and a very slow one only lands every other round');
+
+// Five swings is the hard cap however fast the weapon is.
+eq(sched(150, 3), '5,5,5', 'a fast weapon is capped at five swings a round');
+eq(sched(10, 3), '5,5,5', '...however fast');
+eq(X.MAX_SWINGS, 5, 'the cap is modMMudFunc.MAX_SWINGS');
+eq(X.ENERGY_PER_ROUND, 1000, 'and a round is worth 1000 energy');
+
+// The carry is taken before the cap, so a very fast weapon still burns the
+// energy it was not allowed to spend.
+eq(sched(1, 2), '5,5', 'burning the round on a one-energy weapon still lands only five');
+
+// Totals track the fight length that is actually set.
+X.setRounds(3);
+eq(X.swingSchedule(400).length, 3, 'the schedule follows the configured fight length');
+X.setRounds(5);
+eq(X.swingSchedule(400).length, 5, '...and back again');
+
+// The change that matters: a weapon whose fractional swings never land is worth
+// less than its continuous rate suggests.
+S.cls = D.classes.find(c => c.name === 'Warrior').n;
+S.level = 24; S.base.str = 66; S.base.agi = 55; S.align = '0';
+Object.assign(X.WCTX, { combat: 4, level: 24, agi: 55, str: 66, encPct: 16, crit: 0, plusMaxDmg: 0 });
+// Two weapons that land the same twelve swings in five rounds, but whose
+// continuous rates disagree about which is faster. Reality decides on damage.
+const trident = X.weaponProfile(item('obsidian trident'));
+const ripper = X.weaponProfile(item('Magus Ripper'));
+eq(trident.schedule.join(','), '2,3,2,3,2', 'the trident lands 2,3,2,3,2');
+eq(ripper.schedule.join(','), '2,2,3,2,3', 'the Magus Ripper lands 2,2,3,2,3');
+eq(trident.swings, ripper.swings, 'both get exactly twelve swings in five rounds');
+ok(trident.throughput > ripper.throughput,
+   'the continuous rate says the trident is ahead',
+   `${trident.throughput.toFixed(1)} vs ${ripper.throughput.toFixed(1)}`);
+ok(ripper.perRound > trident.perRound,
+   '...but on the swings you actually get, the harder-hitting Ripper wins',
+   `${ripper.perRound.toFixed(1)} vs ${trident.perRound.toFixed(1)}`);
+
+// A capped weapon is worth exactly its cap, and the rate agrees there.
+const rapier = X.weaponProfile(item('silver rapier'));
+eq(rapier.schedule.join(','), '5,5,5,5,5', 'a fast weapon sits on the five-swing cap');
+ok(Math.abs(rapier.perRound - rapier.throughput) < 0.01,
+   '...where the continuous rate and the round model agree exactly');
+
+/* ------------------------------------------------------- crits, counted once */
+section('Crits and +Max Damage are paid for exactly once');
+
+Object.assign(X.WCTX, { combat: 4, level: 24, agi: 55, str: 66, encPct: 16,
+                        crit: 0, plusMaxDmg: 0, refWeapon: null });
+
+// With no weapon in the picture the damage model cannot price them, so the flat
+// weights still apply -- a bare-handed martial artist keeps his crit gear.
+X.WCTX.margins = X.damageMargins();
+eq(X.WCTX.margins.crit, 0, 'with no weapon there is no marginal damage from a crit');
+const ring = { stats: { crits: 2 }, type: 0 };
+eq(X.scoreItem(ring, { crits: 40, dmg: 12 }), 80, 'so the flat Crits weight is what counts');
+
+// With a weapon, the flat weight is ignored and the damage model prices them.
+const hammers = item('throwing hammers');
+X.WCTX.refWeapon = hammers;
+X.WCTX.margins = X.damageMargins();
+ok(X.WCTX.margins.crit > 0, 'with a weapon a crit point is worth real damage',
+   X.WCTX.margins.crit.toFixed(3));
+const scored = X.scoreItem(ring, { crits: 40, dmg: 12 });
+const expected = 12 * X.WCTX.margins.crit * 2;
+ok(Math.abs(scored - expected) < 1e-9,
+   'and the flat Crits weight is no longer added on top', `${scored} vs ${expected}`);
+ok(scored < 80, '...which is a lot less than the double count was paying', scored.toFixed(1));
+
+// The marginal rate has to match what the damage model actually does. Move the
+// context by one crit point and one +Max Damage point and check the difference.
+const perRoundAt = (crit, maxdmg) => {
+  const save = { crit: X.WCTX.crit, plusMaxDmg: X.WCTX.plusMaxDmg };
+  X.WCTX.crit = crit; X.WCTX.plusMaxDmg = maxdmg;
+  const v = X.weaponProfile(hammers).perRound;
+  Object.assign(X.WCTX, save);
+  return v;
+};
+const m = X.damageMargins();
+const dCrit = perRoundAt(X.WCTX.crit + 1, X.WCTX.plusMaxDmg) - perRoundAt(X.WCTX.crit, X.WCTX.plusMaxDmg);
+ok(Math.abs(dCrit - m.crit) < 1e-6,
+   'one more Crit is worth exactly what the margin says', `${dCrit.toFixed(4)} vs ${m.crit.toFixed(4)}`);
+const dMax = perRoundAt(X.WCTX.crit, X.WCTX.plusMaxDmg + 1) - perRoundAt(X.WCTX.crit, X.WCTX.plusMaxDmg);
+ok(Math.abs(dMax - m.maxdmg) < 1e-6,
+   'and so is one more point of +Max Damage', `${dMax.toFixed(4)} vs ${m.maxdmg.toFixed(4)}`);
+
+// +Max Damage is worth more than half a point because crits multiply it.
+ok(m.maxdmg > 0.5 * (X.weaponProfile(hammers).swings / X.getRounds()),
+   '+Max Damage beats a plain damage point, because a crit rolls it 2x to 4x');
+
+// Diminishing returns above 40 crit have to show up in the price.
+X.WCTX.crit = 10; X.WCTX.margins = X.damageMargins();
+const cheapCrit = X.damageMargins().crit;
+X.WCTX.crit = 60; X.WCTX.margins = X.damageMargins();
+const dearCrit = X.damageMargins().crit;
+ok(dearCrit < cheapCrit, 'a crit point is worth less once you are past the 40 threshold',
+   `${dearCrit.toFixed(3)} vs ${cheapCrit.toFixed(3)}`);
+ok(Math.abs(dearCrit - cheapCrit / 3) < 1e-6, '...exactly a third as much, per critAfterDR');
+X.WCTX.crit = 0; X.WCTX.refWeapon = null; X.WCTX.margins = X.damageMargins();
+
+// End to end: the harder-hitting weapon now wins, which the double count had
+// backwards -- a rapier's +2 Crits used to outweigh 17 more damage a round.
+S.cls = D.classes.find(c => c.name === 'Warrior').n;
+S.level = 24; S.align = '0';
+S.base.str = 66; S.base.agi = 55; S.base.cha = 40;
+S.equipped = {}; S.carried = []; S.coins = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
+const meleeRes = X.optimize(X.PRESETS['Melee damage'],
+  { pool: 'all', encTarget: 100, allowLimited: false, allowCursed: false, requireInGame: true });
+ok(meleeRes.picks[16], 'the melee build still picks a weapon');
+const chosen = X.weaponProfile(meleeRes.picks[16]);
+ok(chosen.perRound > 50, 'and it is one that actually does damage',
+   `${meleeRes.picks[16].name} at ${chosen.perRound.toFixed(1)}/round`);
+eq(X.DAMAGE_MODELLED.has('crits'), true, 'crits are declared as model-priced');
+eq(X.DAMAGE_MODELLED.has('maxdmg'), true, 'and so is +Max Damage');
+eq(X.PRESETS['Melee damage'].crits, undefined,
+   'the melee preset no longer carries a flat Crits weight');
+eq(X.PRESETS['Martial arts'].crits, 30,
+   'but martial arts keeps one, because its damage is not modelled');
 
 /* ------------------------------------------------------------------ report */
 console.log(`\n${pass} passed, ${fail} failed`);

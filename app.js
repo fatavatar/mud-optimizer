@@ -12,6 +12,7 @@ const D = window.GAMEDATA;
 const S = {
   name: '', preset: 'Balanced', paste: '',
   cls: 0, race: 0, level: 1, align: '0',
+  sc: 0,               // Spellcasting, straight off the stat block if pasted
   base: { str: 0, int: 0, wil: 0, agi: 0, hea: 0, cha: 0 },
   coins: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 },
   equipped: {},        // slot index -> item
@@ -35,6 +36,7 @@ for (const it of D.items) {
   if (!bySquashed.has(k) || (it.inGame && !bySquashed.get(k).inGame)) bySquashed.set(k, it);
 }
 const byNum = new Map(D.items.map(i => [i.n, i]));
+const spellByNum = new Map((D.spells || []).map(sp => [sp.n, sp]));
 const clsByNum = new Map(D.classes.map(c => [c.n, c]));
 const shopByNum = new Map((D.shops || []).map(sh => [sh.n, sh]));
 const mapByNum = new Map((D.maps || []).map(m => [m.n, m]));
@@ -68,7 +70,7 @@ let roster = { active: null, chars: [] };
 
 function blankState() {
   return {
-    name: '', cls: 0, race: 0, level: 1, align: '0',
+    name: '', cls: 0, race: 0, level: 1, align: '0', sc: 0,
     base: { str: 0, int: 0, wil: 0, agi: 0, hea: 0, cha: 0 },
     coins: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 },
     equipped: {}, carried: [], unmatched: [], parsedEnc: null,
@@ -82,7 +84,7 @@ function snapshot() {
   const eq = {};
   for (const k in S.equipped) eq[k] = S.equipped[k].n;
   return {
-    name: S.name, cls: S.cls, race: S.race, level: S.level, align: S.align,
+    name: S.name, cls: S.cls, race: S.race, level: S.level, align: S.align, sc: S.sc,
     base: { ...S.base }, coins: { ...S.coins },
     equipped: eq,
     carried: S.carried.map(i => i.n),
@@ -97,6 +99,7 @@ function restore(snap) {
   S.name = s.name || '';
   S.cls = +s.cls || 0; S.race = +s.race || 0;
   S.level = +s.level || 1; S.align = s.align || '0';
+  S.sc = +s.sc || 0;
   S.base = { ...b.base, ...s.base };
   S.coins = { ...b.coins, ...s.coins };
   S.equipped = {};
@@ -212,13 +215,16 @@ const COIN_WORDS = [
 /* --------------------------------------------------------------- presets */
 
 const PRESETS = {
-  'Melee damage': { ac:10, dr:25, maxdmg:60, crits:40, accy:2, dmg:3, str:3, agi:1.5, hp:.5, dodge:3, hitMagic:5 },
-  'Tank / survivability': { ac:15, dr:45, hp:1, dodge:7, hea:4, mr:3, str:2, accy:.5, maxdmg:15 },
+  // Crits and Max Dmg carry no flat weight in the presets that swing a weapon:
+  // the damage model prices them, and a flat weight on top would pay twice. They
+  // are kept in the martial-arts preset, whose damage this tool does not model.
+  'Melee damage': { ac:10, dr:25, accy:2, dmg:12, str:3, agi:1.5, hp:.5, dodge:3, hitMagic:5 },
+  'Tank / survivability': { ac:15, dr:45, hp:1, dodge:7, hea:4, mr:3, str:2, accy:.5, dmg:3 },
   'Spellcaster': { mana:1, sc:9, manaRegen:7, int:5, wil:5, ac:6, dr:15, hp:.3, mr:3, alterSpellDmg:4 },
-  'Backstab / thief': { bsAccy:6, bsMinDmg:10, bsMaxDmg:10, stealth:5, agi:4, crits:30, accy:2, maxdmg:40, ac:6, dr:12 },
+  'Backstab / thief': { bsAccy:6, bsMinDmg:10, bsMaxDmg:10, stealth:5, agi:4, accy:2, dmg:9, ac:6, dr:12 },
   'Martial arts': { punchDmg:25, kickDmg:25, jumpkickDmg:25, punchSkill:12, kickSkill:12, jumpkickSkill:12,
-                    punchAccy:8, kickAccy:8, jumpkickAccy:8, ac:10, dr:25, agi:3, crits:30, dodge:4 },
-  'Balanced': { ac:10, dr:25, maxdmg:35, crits:20, accy:2, dmg:2, hp:.6, mana:.4, dodge:3, sc:2,
+                    punchAccy:8, kickAccy:8, jumpkickAccy:8, ac:10, dr:25, agi:3, crits:30, maxdmg:30, dodge:4 },
+  'Balanced': { ac:10, dr:25, accy:2, dmg:8, hp:.6, mana:.4, dodge:3, sc:2,
                 str:2, agi:2, hea:2, int:2, wil:2, cha:1, hpRegen:2, manaRegen:2 },
 };
 
@@ -300,7 +306,42 @@ function critAfterDR(c) {
 /* Scoring context -- set before each optimize run.
  * `crit` is the character's Crits stat from class, race and gear; `plusMaxDmg`
  * is the +Max Damage those same sources contribute. */
-const WCTX = { combat: 0, level: 1, agi: 50, str: 50, encPct: 50, crit: 0, plusMaxDmg: 0 };
+const WCTX = { combat: 0, level: 1, agi: 50, str: 50, encPct: 50, crit: 0, plusMaxDmg: 0,
+               refWeapon: null, margins: { crit: 0, maxdmg: 0 } };
+
+/* Stats that reach the score through the damage model rather than on their own.
+ * Scoring them flatly as well would pay for the same point twice: +2 Crits on a
+ * ring would earn its flat weight AND raise the weapon's damage per round on the
+ * next pass of the fixed point. They keep their flat weight only when there is
+ * no weapon for the model to work with -- a bare-handed martial artist, say. */
+const DAMAGE_MODELLED = new Set(['crits', 'maxdmg']);
+
+/* What one more point of Crits, or of +Max Damage, is worth in damage per round
+ * to the weapon this pass is assuming. Both are exactly linear in the swing
+ * maths, so a single marginal rate values them correctly wherever they are worn. */
+function damageMargins() {
+  const wep = WCTX.refWeapon;
+  if (!wep || wep.type !== 1) return { crit: 0, maxdmg: 0 };
+  const p = weaponProfile(wep);
+  const perRoundSwings = p.swings / fightRounds;
+
+  const maxD = (wep.max || 0) + WCTX.plusMaxDmg;
+  const normal = ((wep.min || 0) + maxD) / 2;
+  const crit = 3 * maxD;
+  const pc = p.critPct / 100;
+
+  // critAfterDR is piecewise: one for one up to 40, a third of that above it,
+  // and nothing at all once the 99 cap is reached.
+  const raw = WCTX.crit + p.qnd;
+  const slope = p.critPct >= 99 ? 0 : (raw < 40 ? 1 : 1 / 3);
+
+  return {
+    crit: perRoundSwings * ((crit - normal) / 100) * slope,
+    // +Max Damage lifts the normal roll by half a point and the crit by three,
+    // because a crit rolls 2x to 4x the max.
+    maxdmg: perRoundSwings * ((1 - pc) * 0.5 + 3 * pc),
+  };
+}
 
 function sumAbil(abils, code) {
   return (abils || []).reduce((a, [c, v]) => a + (c === code ? v : 0), 0);
@@ -309,6 +350,40 @@ function sumAbil(abils, code) {
 function weaponEnergy(it) {
   return calcEnergyUsed(WCTX.combat, WCTX.level, it.speed || 1000, WCTX.agi,
                         WCTX.str, WCTX.encPct, it.strReq || 0);
+}
+
+/* Combat is fought in rounds. Each round you are handed 1000 energy on top of
+ * whatever was left over, and you swing as many times as that pays for -- so a
+ * weapon worth "2.5 swings" really lands 2, 3, 2, 3, not two and a half every
+ * round. The original Pascal is quoted in MME's frmSwingCalc:
+ *
+ *     Temp := 1000;
+ *     repeat
+ *       I    := Temp div EU;
+ *       Temp := (Temp mod EU) + 1000;
+ *       If (I > MAX_SWINGS) Then I := MAX_SWINGS;
+ *     until False
+ *
+ * Note the order: the carry is taken from the uncapped division, so a very fast
+ * weapon still burns all its energy but only ever lands five swings. */
+const ENERGY_PER_ROUND = 1000;
+const MAX_SWINGS = 5;               // modMMudFunc.MAX_SWINGS
+/* Most fights are over quickly, so a weapon is judged on the opening rounds
+ * rather than on a rate it would only reach in a long one. Five is the default
+ * because that is about how long a fight lasts; the Optimize tab can change it. */
+const FIGHT_ROUNDS_DEFAULT = 5;
+let fightRounds = FIGHT_ROUNDS_DEFAULT;
+
+function swingSchedule(energy, rounds) {
+  const eu = Math.max(1, Math.trunc(energy));
+  const out = [];
+  let temp = ENERGY_PER_ROUND;
+  for (let r = 0; r < (rounds || fightRounds); r++) {
+    let n = Math.trunc(temp / eu);
+    temp = (temp % eu) + ENERGY_PER_ROUND;
+    out.push(Math.min(MAX_SWINGS, n));
+  }
+  return out;
 }
 
 /* Everything about how a weapon actually performs for this character. */
@@ -326,11 +401,21 @@ function weaponProfile(it) {
   const crit = 3 * maxD;                     // a crit rolls 2x to 4x max damage
   const perSwing = (1 - p) * normal + p * crit;
 
+  // What you actually get in a short fight, round by round.
+  const schedule = swingSchedule(energy, fightRounds);
+  const swings = schedule.reduce((a, b) => a + b, 0);
+  const fightDamage = swings * perSwing;
+
   return { energy, qnd, critPct, normal, crit, perSwing,
-           throughput: (perSwing * 1000) / energy };
+           schedule, swings, fightDamage,
+           perRound: fightDamage / fightRounds,
+           // The continuous rate MME reports, kept for comparison. It is what
+           // the weapon would do if fractional swings were real; over five
+           // rounds they are not.
+           throughput: Math.min(MAX_SWINGS, 1000 / energy) * perSwing };
 }
 
-function weaponThroughput(it) { return weaponProfile(it).throughput; }
+function weaponThroughput(it) { return weaponProfile(it).perRound; }
 
 function coinsToCopper(c) {
   let t = 0;
@@ -404,6 +489,67 @@ function shopTooltip(it) {
          (charm ? ` (prices include your Charm ${charm})` : '') + ':\n' + rows.join('\n');
 }
 
+/* ------------------------------------------------------------ monster drops */
+/* A lot of the best gear is never sold anywhere -- you take it off something.
+ * Monsters.DropItem-0..9 is the drop table, DropItem%-N the chance. */
+
+const monByNum = new Map((D.monsters || []).map(m => [m.n, m]));
+
+/* The drop worth hunting: the highest chance, and among equal chances the
+ * weakest monster carrying it. */
+function bestDrop(it) {
+  if (!it || !it.drop || !it.drop.length) return null;
+  let best = null;
+  for (const [mnum, pct] of it.drop) {
+    const m = monByNum.get(mnum);
+    if (!m) continue;
+    if (!best || pct > best.pct || (pct === best.pct && m.exp < best.mon.exp)) {
+      best = { mon: m, pct };
+    }
+  }
+  return best;
+}
+
+function monLocText(m) {
+  if (!m.maps || !m.maps.length) return '';
+  const named = m.maps.map(n => {
+    const mp = mapByNum.get(n);
+    return mp ? `map ${n} (${mp.tier})` : `map ${n}`;
+  });
+  return named.join(', ') + (m.room ? ` — ${m.room}` : '');
+}
+
+function dropTooltip(it) {
+  if (!it || !it.drop || !it.drop.length) return '';
+  const rows = it.drop.map(([mnum, pct]) => {
+    const m = monByNum.get(mnum);
+    if (!m) return null;
+    const where = monLocText(m);
+    return `- ${m.name || 'Monster #' + m.n} (${pct}%)` +
+           (m.exp ? `, ${m.exp.toLocaleString()} exp` : '') +
+           (m.hp ? `, ${m.hp.toLocaleString()} hp` : '') +
+           (m.inGame ? '' : ', not in game') +
+           (where ? `\n    ${where}` : '\n    location unknown');
+  }).filter(Boolean);
+  if (!rows.length) return '';
+  return `Dropped by ${rows.length} monster${rows.length > 1 ? 's' : ''}:\n` + rows.join('\n');
+}
+
+/* Where an item can come from at all, in one line for a table cell. */
+function sourceText(it) {
+  const bb = bestBuy(it);
+  if (bb) return { text: priceText(bb.cost), title: shopTooltip(it), kind: 'shop' };
+  const d = bestDrop(it);
+  if (d) {
+    return {
+      text: `${d.mon.name || 'monster #' + d.mon.n} ${d.pct}%`,
+      title: dropTooltip(it),
+      kind: 'drop',
+    };
+  }
+  return { text: 'no known source', title: '', kind: 'none' };
+}
+
 /* ---------------------------------------------------------- eligibility */
 
 function isUsable(it, opt) {
@@ -457,9 +603,19 @@ function avgDmg(it) { return it.type === 1 ? ((it.min || 0) + (it.max || 0)) / 2
 
 function scoreItem(it, w) {
   let s = 0;
-  for (const k in it.stats) s += (w[k] || 0) * it.stats[k];
+  const modelled = !!WCTX.refWeapon;
+  for (const k in it.stats) {
+    if (modelled && DAMAGE_MODELLED.has(k)) continue;      // paid below, once
+    s += (w[k] || 0) * it.stats[k];
+  }
   if (it.ns) for (const k in it.ns) s += (w[k] || 0) * it.ns[k];
   if (it.accy) s += (w.accy || 0) * it.accy;
+
+  if (modelled) {
+    const m = WCTX.margins;
+    s += (w.dmg || 0) * (m.crit * (it.stats.crits || 0) + m.maxdmg * (it.stats.maxdmg || 0));
+  }
+  // A weapon is additionally worth the damage it swings for on its own.
   if (it.type === 1) s += (w.dmg || 0) * weaponThroughput(it);
   return s;
 }
@@ -475,6 +631,150 @@ function totalsOf(picks) {
   }
   for (const k in ns) t[k] = (t[k] || 0) + ns[k];
   return { t, enc };
+}
+
+/* ------------------------------------------------------------------ spells */
+/* Formulas ported from MMUD Explorer: modMMudDatabase.GetCurrentSpellMinMax,
+ * GetSpellMinDamage/MaxDamage/Duration, PullSpellEQ, and
+ * modMMudFunc.GetSpellCastChance / SpellIsUsable. */
+
+const STOCK_SPELL_HIT_CAP = 98;      // modMMudFunc: Kai is capped at 100 instead
+
+/* Abilities that carry no magnitude -- they are on or off. (PullSpellEQ's
+ * "Case 23, 51, 52, 80, 97, 98, 100, 108 To 113, 119, 138, 144, 178".) */
+const SPELL_FLAG_ABILS = new Set([23, 51, 52, 80, 97, 98, 100,
+                                  108, 109, 110, 111, 112, 113, 119, 138, 144, 178]);
+/* Abilities whose magnitude is a plain number rather than a bonus, so it is
+ * printed without a leading "+". */
+const SPELL_UNSIGNED_ABILS = new Set([1, 8, 17, 18, 19, 140, 141, 148]);
+/* Bookkeeping abilities: which line of flavour text the game prints, which
+ * spell this one strips. MME lists them; a player choosing a spell does not
+ * need "DescMsg 8531" and it crowds out the effects that matter. */
+const SPELL_NOISE_ABILS = new Set([101, 115, 120, 122, 137, 148]);
+
+const SPELL_DMG_ABILS = new Set(D.spellDamageAbils || [1, 8, 17]);
+const SPELL_HEAL_ABILS = new Set(D.spellHealAbils || [8, 18]);
+/* Stock MajorMUD gives the worn +Spell Dmg bonus to damage only; the heal side
+ * of a drain is bonused in GreaterMUD, which this tool does not model. */
+const SPELL_BONUS_ABILS = new Set([1, 17]);
+
+/* The caster's level is clamped into the spell's own band before anything
+ * scales off it. Cap 0 means the spell never stops improving. */
+function spellCastLevel(sp, level) {
+  let n = Math.trunc(level) || 0;
+  if (sp.cap > 0 && n > sp.cap) n = sp.cap;
+  if (n < sp.req) n = sp.req;
+  return n;
+}
+
+/* [base, increment, levels-per-increment] -> the value at this cast level.
+ * Fix() truncates toward zero, so the fraction is dropped, not rounded. */
+function spellScale(t, castLevel) {
+  const [base, inc, lvls] = t;
+  if (!lvls || !inc || castLevel < 1) return base;
+  return base + Math.trunc((inc / lvls) * castLevel);
+}
+
+/* A spell cheap enough in energy goes off more than once a round. */
+function spellCastsPerRound(sp) {
+  const cost = sp.energy || 0;
+  if (cost < 143 || cost > 500) return 1;
+  const rem = Math.max(1, 1000 - cost);
+  if (rem < 143) return 1;
+  return 1 + Math.trunc(rem / cost);
+}
+
+/* GetSpellCastChance. Diff is usually negative -- it is a penalty on your
+ * Spellcasting, not a target number. */
+function spellCastChance(sp, spellcasting) {
+  if (!(spellcasting > 0) || sp.diff >= 200) return 100;
+  const cap = sp.magery === 5 ? 100 : STOCK_SPELL_HIT_CAP;
+  return Math.min(cap, Math.max(0, spellcasting + sp.diff));
+}
+
+/* SpellIsUsable's alignment gate, carried on the spell as abilities. */
+function spellAlignOk(sp, align) {
+  if (!align || align === '0') return true;
+  for (const [code] of sp.abils) {
+    const only = D.spellAlignIs[code];
+    if (only && only !== align) return false;
+    const not = D.spellAlignNot[code];
+    if (not && not === align) return false;
+  }
+  return true;
+}
+
+/* Everything one spell does at a given level, for a caster with this much
+ * Spellcasting and this much worn +Spell Dmg. */
+function spellAt(sp, level, spellcasting, bonusPct) {
+  const cl = spellCastLevel(sp, level);
+  const mult = bonusPct > 0 ? 1 + Math.round(bonusPct) / 100 : 1;
+
+  const rawMin = spellScale(sp.min, cl), rawMax = spellScale(sp.max, cl);
+  const bonMin = mult > 1 ? Math.trunc(rawMin * mult) : rawMin;
+  const bonMax = mult > 1 ? Math.trunc(rawMax * mult) : rawMax;
+  const dur = spellScale(sp.dur, cl);
+
+  const out = {
+    castLevel: cl, dur, min: rawMin, max: rawMax,
+    casts: spellCastsPerRound(sp),
+    chance: spellCastChance(sp, spellcasting),
+    dmg: null, heal: null, effects: [], bonused: false,
+    capped: sp.cap > 0 && level > sp.cap,
+    scales: !!((sp.min[1] && sp.min[2]) || (sp.max[1] && sp.max[2]) || (sp.dur[1] && sp.dur[2])),
+  };
+
+  for (const [code, val] of sp.abils) {
+    const name = D.abilityNames[code] || ('Ability ' + code);
+
+    // A non-zero ability value is the effect outright; the spell's min/max
+    // range then belongs to some other ability, or to nothing at all.
+    if (val !== 0) {
+      if (SPELL_DMG_ABILS.has(code)) out.dmg = { min: val, max: val, fixed: true };
+      if (SPELL_HEAL_ABILS.has(code)) out.heal = { min: val, max: val, fixed: true };
+      if (SPELL_NOISE_ABILS.has(code)) continue;
+      out.effects.push(`${name} ${code === 7 ? val / 10 : val}`);
+      continue;
+    }
+
+    const gets = SPELL_BONUS_ABILS.has(code);
+    const lo = gets ? bonMin : rawMin, hi = gets ? bonMax : rawMax;
+    if (gets && mult > 1) out.bonused = true;
+
+    if (SPELL_DMG_ABILS.has(code) && !(code === 8 && out.dmg)) out.dmg = { min: lo, max: hi };
+    if (SPELL_HEAL_ABILS.has(code)) out.heal = { min: rawMin, max: rawMax };
+
+    if (SPELL_NOISE_ABILS.has(code)) continue;
+    if (SPELL_FLAG_ABILS.has(code)) { out.effects.push(name); continue; }
+    if (SPELL_DMG_ABILS.has(code) || code === 18) continue;   // shown as the damage line
+
+    // Ability 7 (DR) is stored x10 here exactly as it is on items. PullSpellEQ
+    // adds the "+" only to a positive value, so a penalty reads "Accuracy -6".
+    const f = v => (code === 7 ? v / 10 : v);
+    const w = v => (!SPELL_UNSIGNED_ABILS.has(code) && v > 0 ? '+' : '') + fmt(f(v));
+    out.effects.push(lo === hi ? `${name} ${w(lo)}` : `${name} ${w(lo)} to ${w(hi)}`);
+  }
+  return out;
+}
+
+/* How the numbers grow, in words, so the table can say why they will change. */
+function spellScalingText(sp) {
+  const bits = [];
+  const per = t => (t[2] === 1 ? 'level' : t[2] + ' levels');
+  if (sp.min[1] && sp.min[2]) bits.push(`min +${sp.min[1]} / ${per(sp.min)}`);
+  if (sp.max[1] && sp.max[2]) bits.push(`max +${sp.max[1]} / ${per(sp.max)}`);
+  if (sp.dur[1] && sp.dur[2]) bits.push(`duration +${sp.dur[1]} / ${per(sp.dur)}`);
+  if (!bits.length) return 'does not scale with level';
+  return bits.join(', ') + (sp.cap > 0 ? `, stops at level ${sp.cap}` : ', no cap');
+}
+
+/* The spells one class can learn, gated by level and alignment. */
+function spellsFor(clsNum, level, align, opt) {
+  const list = (D.castable[clsNum] || []).map(n => spellByNum.get(n)).filter(Boolean);
+  return list.filter(sp => {
+    if (opt && opt.knownOnly && level > 0 && level < sp.req) return false;
+    return spellAlignOk(sp, align);
+  });
 }
 
 /* ------------------------------------------------------- what a set does */
@@ -513,7 +813,9 @@ function profileOf(set, innate) {
     p.perSwing = wp.perSwing;
     p.critPct = wp.critPct;
     p.energy = wp.energy;
-    p.dps = wp.throughput;      // damage per 1000 energy -- comparable across speeds
+    p.dps = wp.perRound;        // average damage per round over the opening five
+    p.swings = wp.swings;
+    p.schedule = wp.schedule;
   }
   return p;
 }
@@ -567,7 +869,8 @@ function swapImpact(res, slots, innate, base) {
 
 /* Ordered most-decisive first, so a crowded cell truncates from the bottom. */
 const IMPACT_ROWS = [
-  ['dps', 'DPS', 1], ['perSwing', 'Dmg/swing', 1], ['critPct', 'Crit %', 0],
+  ['dps', 'Dmg/round', 1], ['swings', 'Swings in the fight', 0],
+  ['perSwing', 'Dmg/swing', 1], ['critPct', 'Crit %', 0],
   ['ac', 'AC', 0], ['dr', 'DR', 0], ['mr', 'Magic Resist', 0],
   ['dodgeTotal', 'Dodge', 0], ['accyTotal', 'Accuracy', 0],
   ['hp', 'Max HP', 0], ['mana', 'Max Mana', 0],
@@ -598,10 +901,14 @@ function candidatePool(mode, opt) {
     const owned = new Map();
     for (const it of [...Object.values(S.equipped), ...S.carried]) owned.set(it.n, it);
     pool = [...owned.values()];
-  } else if (mode === 'buyable') {
+  } else if (mode === 'buyable' || mode === 'obtainable') {
     const budget = coinsToCopper(S.coins);
     const owned = new Set([...Object.values(S.equipped), ...S.carried].map(i => i.n));
-    pool = D.items.filter(i => owned.has(i.n) || itemCostCopper(i) <= budget);
+    // "Obtainable" also allows anything a monster drops. There is no price on
+    // those -- you go and take them -- so the purse does not gate them.
+    const drops = mode === 'obtainable';
+    pool = D.items.filter(i => owned.has(i.n) || itemCostCopper(i) <= budget ||
+                               (drops && i.drop && i.drop.length));
   } else {
     pool = D.items;
   }
@@ -646,19 +953,34 @@ function optimize(w, opt) {
   // from what the character is wearing now.
   const seed = totalsOf(Object.values(S.equipped)).t;
   let gearCrit = seed.crits || 0, gearMax = seed.maxdmg || 0, best = null;
+  // The reference weapon is what Crits and +Max Damage are priced against, so it
+  // is seeded from the weapon in hand and then follows each pass's own pick.
+  let refWeapon = S.equipped[16] || null;
+  if (!refWeapon) {
+    // Nothing in hand: price against the best weapon this character could pick
+    // up, so crit gear is not written off before a weapon has been chosen.
+    const weapons = cands.filter(i => i.type === 1 && slotPool(i.slot) === 'weapon');
+    refWeapon = weapons.reduce((a, b) => (!a || (b.max || 0) > (a.max || 0) ? b : a), null);
+  }
   for (let pass = 0; pass < 4; pass++) {
     WCTX.crit = innateCrit + gearCrit;
     WCTX.plusMaxDmg = innateMaxDmg + gearMax;
+    WCTX.refWeapon = refWeapon;
+    WCTX.margins = damageMargins();
     best = run();
     const nc = best.totals.crits || 0, nm = best.totals.maxdmg || 0;
-    if (nc === gearCrit && nm === gearMax) break;
+    const nw = best.picks[16] || null;
+    if (nc === gearCrit && nm === gearMax && nw === refWeapon) break;
     gearCrit = nc; gearMax = nm;
+    if (nw) refWeapon = nw;
   }
   // The iteration can oscillate rather than settle. Whatever it ended on, the
   // numbers we report must describe the kit we are actually recommending, so
   // re-derive the context from the chosen set before anything renders from it.
   WCTX.crit = innateCrit + (best.totals.crits || 0);
   WCTX.plusMaxDmg = innateMaxDmg + (best.totals.maxdmg || 0);
+  WCTX.refWeapon = best.picks[16] || null;
+  WCTX.margins = damageMargins();
   best.innateCrit = innateCrit;
   best.innateMaxDmg = innateMaxDmg;
   best.critStat = WCTX.crit;
@@ -812,6 +1134,7 @@ function parseChar(text) {
     else if (k === 'willpower') S.base.wil = v;
     else if (k === 'health') S.base.hea = v;
     else if (k === 'charm') S.base.cha = v;
+    else if (k === 'spellcasting') S.sc = v;
   }
   while ((m = word.exec(text))) {
     const k = m[1].toLowerCase(), v = m[2].trim();
@@ -950,6 +1273,13 @@ function initForm() {
   p.value = 'Balanced';
   S.weights = { ...PRESETS['Balanced'] };
 
+  const sc = $('#sp-class');
+  sc.innerHTML = '<option value="0">— pick a class —</option>';
+  for (const c of D.classes) {
+    const n = (D.castable[c.n] || []).length;
+    sc.append(new Option(`${c.name}${n ? '' : '  (no spells)'}`, c.n));
+  }
+
   const qs = $('#q-slot');
   const seen = new Set();
   for (const s of D.slots) {
@@ -987,6 +1317,8 @@ function renderRoster() {
 /* Everything the active character owns, put on screen at once. */
 function showActiveChar() {
   syncFormFromState();
+  spellsOverridden = false;      // a different character, so start from theirs
+  spellPrefsFromChar();
   renderRoster();
   $('#parse-status').textContent = '';
   renderResults(null);
@@ -998,6 +1330,7 @@ function syncStateFromForm() {
   for (const k in S.base) S.base[k] = +$('#s-' + k).value || 0;
   for (const k in S.coins) S.coins[k] = +$('#c-' + k).value || 0;
   renderPurse();
+  syncSpellsToChar();
   touch();
   renderRoster();      // the tab label follows the name field as it is typed
 }
@@ -1151,7 +1484,13 @@ function renderResults(res) {
     const armed = now.weapon != null;
     addCell('Crit chance', then.critPct + '%', armed ? delta(now.critPct, then.critPct) : null);
     addCell('Dmg / swing', then.perSwing.toFixed(1), armed ? delta(now.perSwing, then.perSwing) : null);
-    addCell('DPS (per 1000 energy)', then.dps.toFixed(1), armed ? delta(now.dps, then.dps) : null);
+    const dpsCell = addCell('Dmg / round', then.dps.toFixed(1), armed ? delta(now.dps, then.dps) : null);
+    dpsCell.append(el('div', 'k', `${then.schedule.join(', ')} swings over ${fightRounds} rounds`));
+    dpsCell.title =
+      `Each round hands you ${ENERGY_PER_ROUND} energy on top of what is left over, and ` +
+      `this weapon costs ${then.energy} a swing, so the swings land ${then.schedule.join(', ')} ` +
+      `— ${then.swings} in ${fightRounds} rounds, ${then.dps.toFixed(1)} damage a round on average. ` +
+      `${MAX_SWINGS} swings is the hard cap in any one round.`;
     const cell = addCell('Crit hits for', `${(2 * (wep.max + res.plusMaxDmg))}-${(4 * (wep.max + res.plusMaxDmg))}`);
     cell.append(el('div', 'k', res.plusMaxDmg
       ? `2-4x max dmg, incl. your +${res.plusMaxDmg} max`
@@ -1172,7 +1511,7 @@ function renderResults(res) {
     '<th title="Everything the whole set changes if you make this one swap, ' +
     'including knock-on effects like encumbrance costing you dodge and crit chance.">' +
     'Impact of this swap</th><th class="num">Enc</th><th>What it gives</th>' +
-    '<th class="num">Cost</th></tr></thead>';
+    '<th>Where to get it</th></tr></thead>';
   const tb = el('tbody');
 
   /* One impact figure per swap, worked out once and hung on the row that owns
@@ -1211,6 +1550,11 @@ function renderResults(res) {
       else {
         const ab = activeBuy(nw);
         if (ab && ab.length) tags.append(el('span', 'tag buy', `in ${ab.length} shop${ab.length > 1 ? 's' : ''}`));
+        if (nw.drop && nw.drop.length) {
+          const t = el('span', 'tag drop', `drops from ${nw.drop.length} monster${nw.drop.length > 1 ? 's' : ''}`);
+          t.title = dropTooltip(nw);
+          tags.append(t);
+        }
       }
       if (tags.children.length) tdNew.append(tags);
     }
@@ -1225,6 +1569,7 @@ function renderResults(res) {
         bits.push(`dmg ${nw.min}-${nw.max}`, D.weaponTypes[nw.wtype], `energy ${wp.energy}`);
         bits.push(`crit ${wp.critPct}%` + (wp.qnd ? ` (incl. +${wp.qnd} quick & deadly)` : ''));
         bits.push(`~${wp.perSwing.toFixed(1)}/swing`);
+        bits.push(`swings ${wp.schedule.join('-')} = ${wp.perRound.toFixed(1)}/round`);
       }
       for (const k in nw.stats) if (nw.stats[k]) bits.push(`${D.statLabels[k] || k} ${nw.stats[k] > 0 ? '+' : ''}${fmt(nw.stats[k])}`);
       if (nw.ns) for (const k in nw.ns) bits.push(`${D.statLabels[k] || k} +${nw.ns[k]}*`);
@@ -1232,10 +1577,15 @@ function renderResults(res) {
     }
     tr.append(el('td', 'bonus', bits.join(' · ')));
 
-    const td$ = el('td', 'num');
-    const bb = nw && !isOwned(nw) ? bestBuy(nw) : null;
-    if (bb) { td$.textContent = priceText(bb.cost); td$.title = shopTooltip(nw); }
-    else td$.textContent = nw && !isOwned(nw) ? 'drop only' : '—';
+    const td$ = el('td', 'source');
+    if (!nw) td$.textContent = '—';
+    else if (isOwned(nw)) td$.append(el('span', 'imp-none', 'you have it'));
+    else {
+      const src = sourceText(nw);
+      const sp = el('span', 'src ' + src.kind, src.text);
+      if (src.title) { sp.title = src.title; sp.classList.add('has-shop'); }
+      td$.append(sp);
+    }
     tr.append(td$);
     tb.append(tr);
   }
@@ -1243,13 +1593,17 @@ function renderResults(res) {
 
   const legend = el('div', 'hint legend');
   legend.textContent =
+    'Damage is counted round by round over the first ' + fightRounds + ' rounds, because ' +
+    'leftover energy carries between rounds and most fights are short — a weapon worth ' +
+    '"2.5 swings" lands 2, 3, 2, 3, and never more than five in one round. ' +
     'Impact is measured against the whole recommendation with only that slot put back ' +
     'the way you wear it now, so it answers "what does changing this one thing buy me". ' +
     'The column does not add up to the totals above: gear interacts, and weight taken off ' +
     'one slot pays for itself somewhere else.';
   box.append(legend);
 
-  const buys = D.slots.map(s => res.picks[s.i]).filter(i => i && !isOwned(i) && bestBuy(i));
+  const need = D.slots.map(s => res.picks[s.i]).filter(i => i && !isOwned(i));
+  const buys = need.filter(i => bestBuy(i));
   if (buys.length) {
     const cost = buys.reduce((a, i) => a + bestBuy(i).cost, 0);
     const have = coinsToCopper(S.coins);
@@ -1258,6 +1612,23 @@ function renderResults(res) {
       (have ? (cost <= have ? `You can afford that (you have ${copperToText(have)}).`
                             : `You have ${copperToText(have)}, so you are short ${copperToText(cost - have)}.`) : '');
     box.append(note);
+  }
+
+  const hunt = need.filter(i => !bestBuy(i) && bestDrop(i));
+  if (hunt.length) {
+    const note = el('div', 'warn');
+    note.textContent = `${hunt.length} recommended item(s) are not sold anywhere and have to be ` +
+      `taken off something: ` +
+      hunt.map(i => { const d = bestDrop(i); return `${i.name} (${d.mon.name}, ${d.pct}%)`; }).join('; ') + '.';
+    note.title = hunt.map(i => dropTooltip(i)).join('\n\n');
+    box.append(note);
+  }
+
+  const nowhere = need.filter(i => !bestBuy(i) && !bestDrop(i));
+  if (nowhere.length) {
+    box.append(el('div', 'warn',
+      `${nowhere.length} recommended item(s) have no shop and no drop source in the database: ` +
+      nowhere.map(i => i.name).join(', ') + '. They may be quest or event items.'));
   }
 }
 
@@ -1319,6 +1690,146 @@ function isOwned(it) {
   return S.carried.some(c => c.n === it.n);
 }
 
+/* ------------------------------------------------------------ spells tab */
+
+/* The spell controls follow the active character until the user overrides one
+ * of them by hand; after that they are left alone, and "Use my character" is
+ * how you hand them back. Search and sort are view options, not character
+ * facts, so touching those does not count. */
+let spellsOverridden = false;
+
+function syncSpellsToChar() {
+  if (!spellsOverridden) spellPrefsFromChar();
+}
+
+function spellPrefsFromChar() {
+  if (!$('#sp-class')) return;
+  $('#sp-class').value = S.cls || 0;
+  $('#sp-level').value = S.level || 1;
+  $('#sp-align').value = S.align || '0';
+  // Spellcasting off the stat block already includes gear; if the character
+  // was typed in rather than pasted, fall back to what the worn kit supplies.
+  const gear = totalsOf(Object.values(S.equipped)).t;
+  $('#sp-sc').value = S.sc || gear.sc || 0;
+  $('#sp-bonus').value = gear.alterSpellDmg || 0;
+}
+
+function renderSpells() {
+  const box = $('#sp-results'); box.innerHTML = '';
+  const note = $('#sp-note');
+  const clsNum = +$('#sp-class').value;
+  const level = +$('#sp-level').value || 0;
+  const sc = +$('#sp-sc').value || 0;
+  const bonus = +$('#sp-bonus').value || 0;
+  const align = $('#sp-align').value;
+  const q = $('#sp-q').value.trim().toLowerCase();
+  const sort = $('#sp-sort').value;
+  const knownOnly = $('#sp-known').checked;
+
+  const c = clsByNum.get(clsNum);
+  if (!c) { note.textContent = ''; box.append(el('div', 'empty', 'Pick a class.')); return; }
+  if (!(D.castable[clsNum] || []).length) {
+    note.textContent = '';
+    box.append(el('div', 'empty',
+      `${c.name} casts no spells — magery ${D.mageryNames[c.magery] || c.magery}.`));
+    return;
+  }
+
+  let list = spellsFor(clsNum, level, align, { knownOnly });
+  if (q) list = list.filter(sp => sp.name.toLowerCase().includes(q) ||
+                                  (sp.short || '').toLowerCase().includes(q));
+
+  const at = new Map(list.map(sp => [sp.n, spellAt(sp, level, sc, bonus)]));
+  const avg = sp => { const a = at.get(sp.n).dmg; return a ? (a.min + a.max) / 2 : 0; };
+  const cmp = {
+    level: (a, b) => a.req - b.req || a.name.localeCompare(b.name),
+    name: (a, b) => a.name.localeCompare(b.name),
+    dmg: (a, b) => avg(b) - avg(a) || a.req - b.req,
+    dpm: (a, b) => (avg(b) / (b.mana || 1)) - (avg(a) / (a.mana || 1)) || a.req - b.req,
+    dur: (a, b) => at.get(b.n).dur - at.get(a.n).dur || a.req - b.req,
+    mana: (a, b) => a.mana - b.mana || a.req - b.req,
+  }[sort];
+  list = list.slice().sort(cmp);
+
+  note.textContent =
+    `${c.name} draws on ${D.mageryNames[c.magery]} magery, level ${c.mageryLvl}. ` +
+    `${list.length} spell${list.length === 1 ? '' : 's'} shown at caster level ${level}` +
+    (sc ? `, Spellcasting ${sc}` : ', no Spellcasting set — cast chance assumes 100%') +
+    (bonus ? `, +${bonus}% spell damage` : '') + '.';
+
+  if (!list.length) { box.append(el('div', 'empty', 'Nothing matches.')); return; }
+
+  const wrap = el('div', 'tablewrap');
+  const tbl = el('table');
+  tbl.innerHTML = '<thead><tr><th>Spell</th><th class="num">Lvl</th><th class="num">Mana</th>' +
+    '<th>Damage / heal</th><th class="num">Duration</th><th class="num">Cast</th>' +
+    '<th>Effects</th><th>Target</th></tr></thead>';
+  const tb = el('tbody');
+
+  for (const sp of list) {
+    const a = at.get(sp.n);
+    const tr = el('tr');
+    if (level > 0 && level < sp.req) tr.classList.add('locked');
+
+    const tdName = el('td');
+    tdName.append(el('div', 'pick', sp.name));
+    const sub = el('div', 'tags');
+    if (sp.short) sub.append(el('span', 'tag', sp.short));
+    if (a.casts > 1) sub.append(el('span', 'tag mag', `${a.casts}x / round`));
+    if (a.capped) sub.append(el('span', 'tag lim', `capped at ${sp.cap}`));
+    if (a.bonused) sub.append(el('span', 'tag buy', `+${bonus}% applied`));
+    if (level > 0 && level < sp.req) sub.append(el('span', 'tag lim', `needs level ${sp.req}`));
+    tdName.append(sub);
+    tdName.title = spellScalingText(sp) + (sp.from ? ` · learned from ${sp.from}` : '');
+    tr.append(tdName);
+
+    tr.append(el('td', 'num', String(sp.req)));
+    tr.append(el('td', 'num', String(sp.mana)));
+
+    const tdD = el('td');
+    const range = r => (r.min === r.max ? fmt(r.min) : `${fmt(r.min)}–${fmt(r.max)}`);
+    if (a.dmg) {
+      const d = el('div', null, range(a.dmg) + ' dmg' + (a.casts > 1 ? ` ×${a.casts}` : ''));
+      tdD.append(d);
+      if (sp.mana > 0) {
+        const per = ((a.dmg.min + a.dmg.max) / 2 * a.casts / sp.mana);
+        tdD.append(el('div', 'k', `${per.toFixed(1)} per mana`));
+      }
+    }
+    if (a.heal) tdD.append(el('div', null, range(a.heal) + ' healed'));
+    if (!a.dmg && !a.heal) tdD.append(el('span', 'imp-none', '—'));
+    tr.append(tdD);
+
+    tr.append(el('td', 'num', a.dur > 0 ? `${a.dur} rd` : '—'));
+
+    const tdC = el('td', 'num', a.chance + '%');
+    tdC.title = sp.diff >= 200 ? 'Always succeeds.'
+      : `Spellcasting ${sc || 0} ${sp.diff < 0 ? '−' : '+'} ${Math.abs(sp.diff)} difficulty` +
+        `, capped at ${sp.magery === 5 ? 100 : STOCK_SPELL_HIT_CAP}%`;
+    if (a.chance < 90) tdC.classList.add('down');
+    tr.append(tdC);
+
+    tr.append(el('td', 'bonus', a.effects.join(' · ')));
+
+    const tdT = el('td', 'bonus');
+    tdT.textContent = D.spellTargets[sp.targets] || ('Target ' + sp.targets);
+    tdT.title = `${D.spellAttTypes[sp.att] || sp.att} attack type · ` +
+                (D.spellResists[sp.res] || '');
+    tr.append(tdT);
+
+    tb.append(tr);
+  }
+  tbl.append(tb); wrap.append(tbl); box.append(wrap);
+
+  const legend = el('div', 'hint legend');
+  legend.textContent =
+    'Numbers are for the level in the box, clamped into each spell’s own band: a spell ' +
+    'never scales below its required level, and stops at its cap. Hover a spell name for its ' +
+    'scaling rule, and a cast percentage for how it was worked out. Durations are in rounds. ' +
+    'The +Spell Dmg bonus is applied to damage only — stock MajorMUD does not bonus heals.';
+  box.append(legend);
+}
+
 function renderBrowse() {
   const q = $('#q').value.trim().toLowerCase();
   const pool = $('#q-slot').value;
@@ -1364,9 +1875,13 @@ function renderBrowse() {
       const k = activeBuy(i).length;
       notes.push(`${k} shop${k > 1 ? 's' : ''}, from ${priceText(bb.cost)}`);
     }
-    else if (i.from) notes.push(i.from.slice(0, 48));
+    const dd = bestDrop(i);
+    if (dd) notes.push(`drops: ${dd.mon.name || 'monster #' + dd.mon.n} ${dd.pct}%`);
+    if (!bb && !dd && i.from) notes.push(i.from.slice(0, 48));
     const tdN = el('td', 'bonus', notes.join(' · '));
-    if (bb) { tdN.title = shopTooltip(i); tdN.classList.add('has-shop'); }
+    // Both tooltips when an item is both bought and dropped -- either route counts.
+    const tip = [bb ? shopTooltip(i) : '', dd ? dropTooltip(i) : ''].filter(Boolean).join('\n\n');
+    if (tip) { tdN.title = tip; tdN.classList.add('has-shop'); }
     tr.append(tdN);
     tb.append(tr);
   }
@@ -1395,6 +1910,7 @@ function runOptimize() {
     allowCursed: $('#opt-cursed').checked,
     requireInGame: $('#opt-ingame').checked,
   };
+  fightRounds = +$('#rounds').value || FIGHT_ROUNDS_DEFAULT;
   S.result = optimize(S.weights, opt);
   renderResults(S.result);
 }
@@ -1410,6 +1926,7 @@ function init() {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t === b));
     document.querySelectorAll('.panel').forEach(p => p.classList.toggle('is-active', p.id === 'tab-' + b.dataset.tab));
     if (b.dataset.tab === 'browse') renderBrowse();
+    if (b.dataset.tab === 'spells') renderSpells();
   });
 
   $('#paste').addEventListener('input', () => { S.paste = $('#paste').value; touch(); });
@@ -1422,6 +1939,7 @@ function init() {
     const r = parseChar(txt);
     touch();
     syncFormFromState();
+    syncSpellsToChar();
     renderRoster();
     st.className = 'parse-status ' + (r.fields ? 'ok' : 'err');
     const eq = Object.keys(S.equipped).length;
@@ -1480,6 +1998,14 @@ function init() {
   }));
 
   ['q','q-slot','q-sort','q-usable'].forEach(id => $('#' + id).addEventListener('input', renderBrowse));
+
+  ['sp-q','sp-sort','sp-known']
+    .forEach(id => $('#' + id).addEventListener('input', renderSpells));
+  ['sp-class','sp-level','sp-sc','sp-bonus','sp-align'].forEach(id =>
+    $('#' + id).addEventListener('input', () => { spellsOverridden = true; renderSpells(); }));
+  $('#sp-fromchar').addEventListener('click', () => {
+    spellsOverridden = false; spellPrefsFromChar(); renderSpells();
+  });
 
   renderResults(null);
 }

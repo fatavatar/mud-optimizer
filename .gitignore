@@ -8,3 +8,4 @@ package-lock.json
 
 # created by init.sh
 .venv/
+__pycache__/

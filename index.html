@@ -28,6 +28,7 @@
   <nav class="tabs" id="tabs">
     <button class="tab is-active" data-tab="character">Character</button>
     <button class="tab" data-tab="optimize">Optimize</button>
+    <button class="tab" data-tab="spells">Spells</button>
     <button class="tab" data-tab="browse">Browse Items</button>
   </nav>
 </header>
@@ -127,6 +128,16 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
         <option value="all">Everything in the game</option>
         <option value="owned">Only what I own</option>
         <option value="buyable">What I own + can afford in shops</option>
+        <option value="obtainable">What I own + shops + monster drops</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="rounds">Fight length</label>
+      <select id="rounds">
+        <option value="3">3 rounds</option>
+        <option value="5" selected>5 rounds</option>
+        <option value="8">8 rounds</option>
+        <option value="12">12 rounds</option>
       </select>
     </div>
     <div class="ctl">
@@ -160,12 +171,72 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
 
   <details class="weights">
     <summary>Fine-tune weights</summary>
+    <p class="hint">
+      <strong>Crits</strong> and <strong>Max Dmg</strong> read 0 on purpose. Whenever your
+      character is swinging a weapon they are priced through <em>Weapon damage</em> — a crit
+      point is worth whatever it actually adds to damage per round, which depends on your
+      weapon, your swing count and how far past the 40-crit threshold you already are.
+      Giving them a weight here as well would pay for the same point twice. They still apply
+      on their own if there is no weapon to price them against.
+    </p>
     <div class="weight-grid" id="weight-grid"></div>
     <button class="btn small" id="btn-reset-w">Reset to preset</button>
   </details>
 
   <div id="opt-warn"></div>
   <div class="results" id="results"></div>
+</section>
+
+<!-- ------------------------------------------------ SPELLS -->
+<section class="panel" id="tab-spells">
+
+  <div class="controls">
+    <div class="ctl">
+      <label class="ctl-label" for="sp-class">Class</label>
+      <select id="sp-class"></select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sp-level">Level</label>
+      <input type="number" id="sp-level" min="1" max="1000" value="1">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sp-sc">Spellcasting</label>
+      <input type="number" id="sp-sc" min="0" value="0">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sp-bonus">+Spell Dmg %</label>
+      <input type="number" id="sp-bonus" min="0" value="0">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sp-align">Alignment</label>
+      <select id="sp-align">
+        <option value="0">Any / unknown</option>
+        <option value="good">Good</option>
+        <option value="neutral">Neutral</option>
+        <option value="evil">Evil</option>
+      </select>
+    </div>
+    <div class="ctl grow">
+      <label class="ctl-label" for="sp-q">Search</label>
+      <input type="search" id="sp-q" placeholder="name or short code">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sp-sort">Sort</label>
+      <select id="sp-sort">
+        <option value="level">Level required</option>
+        <option value="name">Name</option>
+        <option value="dmg">Damage</option>
+        <option value="dpm">Damage per mana</option>
+        <option value="dur">Duration</option>
+        <option value="mana">Mana cost</option>
+      </select>
+    </div>
+    <label class="chk"><input type="checkbox" id="sp-known" checked> only what I can cast at this level</label>
+    <button class="btn small" id="sp-fromchar">Use my character</button>
+  </div>
+
+  <p class="hint" id="sp-note"></p>
+  <div id="sp-results"></div>
 </section>
 
 <!-- ------------------------------------------------ BROWSE -->
