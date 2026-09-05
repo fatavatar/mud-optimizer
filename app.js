@@ -2886,6 +2886,17 @@ function indexMap(m) {
 
 const roomName = r => MV.data.names[r[R_NAME]] || 'room ' + r[R_NUM];
 const exitsOf = num => MV.out.get(num) || [];
+
+/* Where a planar exit leads: the same area, another area on this map, or
+ * another map. Only the first can be drawn as a line -- the rest would be a
+ * line across ground that has nothing to do with them. */
+function exitLeaves(r, e) {
+  if (!DIR_STEP[MAP_DIRS[e[1]]]) return false;      // up and down are not lines
+  if (e[2] !== MV.n) return true;
+  const t = MV.byNum.get(e[3]);
+  return !t || t[R_AREA] !== r[R_AREA];
+}
+const leavingExits = r => exitsOf(r[R_NUM]).filter(e => exitLeaves(r, e));
 const mapLabel = mi => `map ${mi.n} — ${mi.label} (${mi.rooms.toLocaleString()} rooms)`;
 
 /* What is worth saying about a room, in the order it matters. */
@@ -2996,7 +3007,10 @@ function drawMap() {
     }
   }
 
-  // exits first, so rooms sit on top of them
+  // Exits first, so rooms sit on top of them -- but only the ones that stay
+  // inside this area. An exit that leaves it would be a line drawn across
+  // unrelated ground, which is exactly the soup the layout exists to avoid, so
+  // those are markers on the room instead.
   ctx.strokeStyle = p.line2;
   ctx.lineWidth = Math.max(1, s / 18);
   ctx.beginPath();
@@ -3007,7 +3021,7 @@ function drawMap() {
       const dir = MAP_DIRS[e[1]];
       if (!DIR_STEP[dir] || e[2] !== m.n) continue;
       const t = MV.byNum.get(e[3]);
-      if (!t) continue;
+      if (!t || t[R_AREA] !== r[R_AREA]) continue;
       // one line per pair: draw it from the lower room number only
       if (t[R_NUM] < r[R_NUM] && exitsOf(t[R_NUM]).some(x => x[2] === m.n && x[3] === r[R_NUM])) continue;
       ctx.moveTo(cx, cy);
@@ -3029,23 +3043,29 @@ function drawMap() {
       ctx.lineWidth = 1;
       ctx.strokeRect(cx - half + 0.5, cy - half + 0.5, box - 1, box - 1);
     }
-    // stairs and doorways out of this plane: a wedge you can click
-    if (s >= 8 && (r[R_FLAG] & (F_UP | F_DOWN | F_AWAY))) {
-      ctx.fillStyle = p.ink;
+    // Ways off this patch of ground: a wedge above for up and below for down,
+    // and a nub on the edge for an exit that leads to another area or another
+    // map. All three are clickable.
+    if (s >= 8) {
       const t = Math.max(2, s * 0.16);
       if (r[R_FLAG] & F_UP) {
+        ctx.fillStyle = p.ink;
         ctx.beginPath();
         ctx.moveTo(cx, cy - half - t - 1); ctx.lineTo(cx - t, cy - half - 1);
         ctx.lineTo(cx + t, cy - half - 1); ctx.closePath(); ctx.fill();
       }
       if (r[R_FLAG] & F_DOWN) {
+        ctx.fillStyle = p.ink;
         ctx.beginPath();
         ctx.moveTo(cx, cy + half + t + 1); ctx.lineTo(cx - t, cy + half + 1);
         ctx.lineTo(cx + t, cy + half + 1); ctx.closePath(); ctx.fill();
       }
-      if (r[R_FLAG] & F_AWAY) {
+      for (const e of leavingExits(r)) {
+        const step = DIR_STEP[MAP_DIRS[e[1]]];
+        if (!step) continue;
         ctx.fillStyle = p.violet;
-        ctx.fillRect(cx + half + 1, cy - t, t, t * 2);
+        ctx.fillRect(cx + step[0] * (half - t / 2) - t / 2,
+                     cy + step[1] * (half - t / 2) - t / 2, t, t);
       }
     }
   }
@@ -3113,9 +3133,14 @@ function fitAll() {
 }
 
 function selectRoom(r, recentre) {
+  const jumped = r && MV.sel && r[R_AREA] !== MV.sel[R_AREA];
   MV.sel = r;
   if (r && recentre) centreOn(r[R_X] + 0.5, r[R_Y] + 0.5, Math.max(MV.scale, 22));
   else drawMap();
+  if (jumped) {
+    const a = MV.data.areas[r[R_AREA]];
+    if (a) $('#mp-area').value = String(r[R_AREA]);
+  }
   renderRoomDetail();
 }
 
@@ -3199,6 +3224,11 @@ function renderRoomDetail() {
     } else {
       row.append(xref(known ? roomName(known) : `${e[2]}/${e[3]}`,
         here ? 'go there' : `map ${e[2]}`, () => travelTo(e[2], e[3])));
+      // Say when the way on leaves the ground you are looking at, because the
+      // view will jump rather than slide.
+      const away = !here ? `map ${e[2]}`
+        : known && known[R_AREA] !== r[R_AREA] ? MV.data.areas[known[R_AREA]].label : '';
+      if (away) row.append(el('span', 'fact-note', '→ ' + away));
     }
     if (ann) row.append(el('span', 'fact-note', ann));
     ways.append(row);
@@ -3241,12 +3271,23 @@ function hitTest(px, py) {
   const wx = MV.ox + px / MV.scale, wy = MV.oy + py / MV.scale;
   const r = MV.cells.get(Math.floor(wx) + ',' + Math.floor(wy));
   if (!r) return null;
-  const dy = wy - r[R_Y] - 0.5;
-  let stair = null;
-  if ((r[R_FLAG] & F_UP) && dy < -0.28) stair = 'U';
-  else if ((r[R_FLAG] & F_DOWN) && dy > 0.28) stair = 'D';
-  return { room: r, stair };
+  const dx = wx - r[R_X] - 0.5, dy = wy - r[R_Y] - 0.5;
+
+  // Outside the room's box, above or below it: the stairs.
+  if (dy < -0.34 && (r[R_FLAG] & F_UP)) return { room: r, exit: stairExit(r, 'U') };
+  if (dy > 0.34 && (r[R_FLAG] & F_DOWN)) return { room: r, exit: stairExit(r, 'D') };
+
+  // On an edge of the box: whichever way out is marked there.
+  if (Math.max(Math.abs(dx), Math.abs(dy)) > 0.17) {
+    const want = (Math.abs(dy) > 0.17 ? (dy < 0 ? 'N' : 'S') : '') +
+                 (Math.abs(dx) > 0.17 ? (dx < 0 ? 'W' : 'E') : '');
+    const e = leavingExits(r).find(x => MAP_DIRS[x[1]] === want);
+    if (e) return { room: r, exit: e };
+  }
+  return { room: r, exit: null };
 }
+
+const stairExit = (r, dir) => exitsOf(r[R_NUM]).find(e => MAP_DIRS[e[1]] === dir) || null;
 
 /* --------------------------------------------------------------- the tab */
 
@@ -3362,7 +3403,7 @@ function wireMap() {
     }
     const hit = hitTest(e.offsetX, e.offsetY);
     const room = hit ? hit.room : null;
-    cv.style.cursor = hit ? (hit.stair ? 'alias' : 'pointer') : 'grab';
+    cv.style.cursor = hit ? (hit.exit ? 'alias' : 'pointer') : 'grab';
     if (room !== MV.hover) { MV.hover = room; drawMap(); }
     showTip(room, e.offsetX, e.offsetY);
   });
@@ -3373,12 +3414,9 @@ function wireMap() {
     if (moved) return;
     const hit = hitTest(e.offsetX, e.offsetY);
     if (!hit) return;
-    // Clicking the wedge on a room takes the stair; clicking the room itself
-    // opens it.
-    if (hit.stair) {
-      const way = exitsOf(hit.room[R_NUM]).find(x => MAP_DIRS[x[1]] === hit.stair);
-      if (way) { travelTo(way[2], way[3]); return; }
-    }
+    // A click on one of a room's marks follows it -- up a stair, down a hole,
+    // or over into the next area. A click on the room itself opens it.
+    if (hit.exit) { travelTo(hit.exit[2], hit.exit[3]); return; }
     selectRoom(hit.room, false);
   };
   cv.addEventListener('pointerup', endDrag);

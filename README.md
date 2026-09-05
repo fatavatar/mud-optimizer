@@ -128,24 +128,43 @@ walks the graph and puts each room one cell from its neighbour in the direction
 the exit points, which is how you draw it in your head while playing.
 
 That cannot always work. A grid has four right angles and the world does not —
-walk north, east, south, west through a loop that does not close and two rooms
-want the same cell. The layout places what it can exactly, keeps looking outward
-when a cell is taken, and then relaxes: a room with unhappy exits is offered the
-cell each neighbour would put it in and takes whichever free one satisfies the
-most of them. **92.5% of exits end up exactly one cell away in their own
-direction**; the rest are drawn as stretched lines rather than dropped, so the
-connection is still true even where the geometry is not.
+walk a loop that does not close and two rooms want the same cell. What you do
+about that decides whether the map is readable.
+
+The obvious repair is to put the room in the nearest free space instead. **Do
+not.** That is what turns a map into soup: each shove moves a room away from
+where its exit says it is, the error compounds along the corridor, and whole
+places end up drawn through each other. Measured on map 1, 1,911 of the 2,151
+rooms outside Darkwood Forest were sitting inside the forest's own bounding box
+— the sewers drawn through the streets above them, the town through the trees.
+
+So a room is only ever placed exactly where a neighbour's exit says it goes. If
+that cell is taken it is left for later, because another of its exits may still
+place it correctly; if nothing can, it is allowed a nudge of one cell; and if
+that fails too it **starts a new area** rather than being shoved somewhere free.
+Tearing keeps every area internally true, and the exits between areas become
+links you click, exactly like a stair. That took the same measurement from 1,911
+rooms out of place to 297, and the sewers are now an area of their own.
 
 | | |
 | --- | --- |
 | Rooms | 26,694 across 17 maps |
-| Areas | 881 — pieces with no walkable path between them, packed side by side onto one plane |
-| Exits drawn cleanly | 92.5% (map 2 is 99.9%, map 1's dense forest 73.6%) |
+| Areas | 1,037 — pieces that cannot share a plane, packed side by side |
+| Exits inside an area | **98.6%** land exactly one cell away in their own direction |
+| Exits between areas | 406 in the whole world, drawn as marks you click |
+| Rooms that sit exactly where a neighbour puts them | 99.7% |
+
+The 1.4% that remain stretched are loops the grid cannot close. They are drawn
+as a longer line rather than dropped, so the connection is still true even where
+the geometry is not.
 
 **Up and down get no cell.** They lead somewhere that would sit on top of what
 is already drawn, so they are wedges on the room — ▲ above, ▼ below — that you
-click to follow. A doorway into another map is a mark on the room's edge and
-loads that map. Every exit is also listed in the room panel with whatever the
+click to follow. An exit into another area, or into another map, is a nub on the
+room's edge facing the way it goes; clicking it takes you there and the area
+picker follows. Those are the only exits not drawn as lines, because a line to
+somewhere packed elsewhere on the plane would cross ground it has nothing to do
+with — which is the soup again. Every exit is also listed in the room panel with whatever the
 database says about it: *(Door)*, *(Key: 1416 [or 101 picklocks])*, *(Trap, 40
 damage)*, *(Hidden/Searchable)*, *(Toll: 500)*, *(Level: 0 to 3)*.
 
@@ -533,7 +552,7 @@ see [The game database](#the-game-database) above for where it comes from.
 node test/run.js
 ```
 
-391 assertions covering the formulas, the paste parser, the eligibility rules,
+395 assertions covering the formulas, the paste parser, the eligibility rules,
 the optimizer's invariants, the per-round swing schedule, the marginal pricing of
 crits, the per-swap impact maths, the spell scaling and cast chance, the drop
 tables and their locations, the reference tabs' indexes and item partition, the

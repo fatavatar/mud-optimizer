@@ -1106,25 +1106,75 @@ eq(shared, 0, 'no two rooms are drawn in the same cell');
 eq(badArea, 0, 'every room belongs to an area');
 eq(outsideBox, 0, 'and sits inside that area’s box, so the area picker frames it');
 
-// The point of the layout: an exit should be a step in its own direction.
-let clean = 0, stretched = 0;
+// The point of the layout: inside an area, an exit is a step in its own
+// direction. Where the world will not lie flat the room is torn into a new area
+// rather than shoved somewhere free, which is what used to draw the sewers
+// through the streets above them.
+let clean = 0, stretched = 0, seams = 0;
+const exactNeighbour = [];
 for (const mi of D.mapIndex) {
   const m = MAPS[mi.n];
-  const pos = new Map(m.rooms.map(r => [r[R_NUM], [r[R_X], r[R_Y]]]));
+  const room = new Map(m.rooms.map(r => [r[R_NUM], r]));
+  const happy = new Set();
   for (const [from, di, tm, to] of m.exits) {
     const step = STEP[D.mapDirs[di]];
     if (!step || tm !== mi.n) continue;
-    const a = pos.get(from), b = pos.get(to);
+    const a = room.get(from), b = room.get(to);
     if (!a || !b) continue;
-    if (b[0] - a[0] === step[0] && b[1] - a[1] === step[1]) clean++; else stretched++;
+    if (a[R_AREA] !== b[R_AREA]) { seams++; continue; }
+    if (b[R_X] - a[R_X] === step[0] && b[R_Y] - a[R_Y] === step[1]) {
+      clean++; happy.add(from); happy.add(to);
+    } else stretched++;
   }
+  // A room in a multi-room area should sit at an exact offset from at least one
+  // of its neighbours; the nudge allows a few not to.
+  const crowd = new Set(m.areas.map((a, i) => (a.rooms > 1 ? i : -1)));
+  const inCrowd = m.rooms.filter(r => crowd.has(r[R_AREA]));
+  exactNeighbour.push([inCrowd.filter(r => happy.has(r[R_NUM])).length, inCrowd.length]);
 }
 const cleanPct = 100 * clean / (clean + stretched);
-ok(cleanPct > 90, 'most exits land one cell away in their own direction',
-   `${cleanPct.toFixed(1)}%`);
-// The rest are loops a grid cannot close, and are drawn as stretched lines
-// rather than dropped.
-ok(stretched > 0, 'the ones that cannot are kept, not thrown away', String(stretched));
+ok(cleanPct > 95, 'inside an area, exits land one cell away in their own direction',
+   `${cleanPct.toFixed(1)}% of ${clean + stretched}`);
+ok(seams > 100 && seams < 1000, 'the exits that cannot are area seams, and there are few',
+   String(seams));
+ok(stretched > 0, 'loops a grid cannot close are kept as stretched lines, not dropped',
+   String(stretched));
+const anchored = exactNeighbour.reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
+ok(100 * anchored[0] / anchored[1] > 95,
+   'and almost every room sits exactly where one of its neighbours puts it',
+   `${(100 * anchored[0] / anchored[1]).toFixed(1)}%`);
+
+// The bug this layout exists to fix: places drawn on top of each other. Map 1's
+// biggest area holds the forest, the labyrinth, the graveyard and the slums, and
+// each should keep to its own ground -- the sewers, which used to be drawn
+// through the streets, are now an area of their own.
+{
+  const m = MAPS[1];
+  const big = m.areas.reduce((a, b, i) => (b.rooms > m.areas[a].rooms ? i : a), 0);
+  const byPlace = new Map();
+  for (const r of m.rooms) {
+    if (r[R_AREA] !== big) continue;
+    const place = (m.names[r[R_NAME]] || '').split(',')[0].trim();
+    if (!byPlace.has(place)) byPlace.set(place, []);
+    byPlace.get(place).push(r);
+  }
+  const biggest = [...byPlace.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+  const xs = biggest[1].map(r => r[R_X]), ys = biggest[1].map(r => r[R_Y]);
+  const box = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  let inside = 0, other = 0;
+  for (const [place, rs] of byPlace) {
+    if (place === biggest[0]) continue;
+    for (const r of rs) {
+      other++;
+      if (r[R_X] >= box[0] && r[R_X] <= box[1] && r[R_Y] >= box[2] && r[R_Y] <= box[3]) inside++;
+    }
+  }
+  ok(100 * inside / other < 40,
+     `other places do not sprawl through ${biggest[0]}`,
+     `${inside} of ${other} rooms inside its box`);
+  ok(!m.areas[big].label.match(/Sewer/) && m.areas.some(a => /Sewer/.test(a.label)),
+     'and the sewers are an area of their own, not drawn through the town');
+}
 
 // Every exit has somewhere to go, on this map or another.
 let danglingSame = 0, danglingAway = 0, badAnn = 0;

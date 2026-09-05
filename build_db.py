@@ -339,99 +339,104 @@ def parse_exit(v):
     return int(m.group(1)), int(m.group(2)), v.strip()
 
 
-def free_cell(taken, x, y, dx, dy):
-    """A cell for a room whose ideal one is already occupied. Carrying on in the
-    same direction keeps the geometry honest -- a corridor that collides stays a
-    corridor -- and only when that fails does it spiral outwards."""
-    if (x, y) not in taken:
-        return x, y, True
-    for k in range(2, 6):
-        c = (x + dx * (k - 1), y + dy * (k - 1))
-        if c not in taken:
-            return c[0], c[1], False
-    for r in range(1, 8):
-        for ox in range(-r, r + 1):
-            for oy in range(-r, r + 1):
-                if max(abs(ox), abs(oy)) != r:
+def layout_map(rooms, adj, nudge=1):
+    """Turn the room graph into cells.
+
+    Every room is placed exactly where its neighbour's exit says it goes. When
+    that cell is already taken the room is left for later, because another of
+    its exits may still place it correctly; only when nothing can is it allowed
+    a nudge of one cell, and only when that fails too does it start a *new
+    area*.
+
+    That last part is the whole point. The world is not flat -- walk a loop that
+    does not close and two rooms want the same cell -- and the obvious repair,
+    dropping the room in the nearest free space, is what turns a map into soup:
+    the sewers end up drawn through the streets above them and the forest
+    through the town. Tearing instead keeps every area internally true, and the
+    exits between areas become links you click, the same as a stair.
+
+    Returns {room: (area, x, y)} and the list of areas as {room: (x, y)}."""
+    placed, areas = {}, []
+    left = set(rooms)
+    nudged = 0
+    while left:
+        # grow each area from its busiest room: a hub lays out straighter than
+        # a dead end does
+        seed = max(sorted(left), key=lambda r: len(adj.get(r, ())))
+        pos = {seed: (0, 0)}
+        taken = {(0, 0): seed}
+        queue = [seed]
+        pending = set()
+        while True:
+            while queue:
+                cur = queue.pop(0)
+                cx, cy = pos[cur]
+                for nb, dx, dy in adj.get(cur, ()):
+                    if nb in pos or nb not in left:
+                        continue
+                    cell = (cx + dx, cy + dy)
+                    if cell in taken:
+                        pending.add(nb)
+                        continue
+                    pos[nb] = cell
+                    taken[cell] = nb
+                    queue.append(nb)
+                    pending.discard(nb)
+            # a room the wave passed over may fit now that more of its
+            # neighbours are down
+            again = False
+            for r in sorted(pending):
+                if r in pos:
                     continue
-                c = (x + ox, y + oy)
-                if c not in taken:
-                    return c[0], c[1], False
-    return None
+                for nb, dx, dy in adj.get(r, ()):
+                    if nb not in pos:
+                        continue
+                    cell = (pos[nb][0] - dx, pos[nb][1] - dy)
+                    if cell in taken:
+                        continue
+                    pos[r] = cell
+                    taken[cell] = r
+                    queue.append(r)
+                    again = True
+                    break
+            if not again:
+                break
+        # one cell of give, so a single awkward room does not become an area of
+        # its own
+        if nudge:
+            moving = True
+            while moving:
+                moving = False
+                for r in sorted(pending):
+                    if r in pos:
+                        continue
+                    best = None
+                    for nb, dx, dy in adj.get(r, ()):
+                        if nb not in pos:
+                            continue
+                        ix, iy = pos[nb][0] - dx, pos[nb][1] - dy
+                        for ox in range(-nudge, nudge + 1):
+                            for oy in range(-nudge, nudge + 1):
+                                cell = (ix + ox, iy + oy)
+                                if cell in taken:
+                                    continue
+                                d = abs(ox) + abs(oy)
+                                if best is None or d < best[0]:
+                                    best = (d, cell)
+                    if best:
+                        pos[r] = best[1]
+                        taken[best[1]] = r
+                        nudged += 1
+                        moving = True
+        for r in pos:
+            left.discard(r)
+        areas.append(pos)
 
-
-def relax(pos, adj, rounds=4):
-    """Nudge rooms that ended up in the wrong place. Every exit wants its
-    neighbour exactly one cell away in its own direction; a room with several
-    unhappy exits is offered each cell its neighbours would put it in, and takes
-    whichever free one satisfies the most of them. Dense areas -- a forest with
-    loops in it -- cannot be drawn on a grid at all, so this narrows the gap
-    rather than closing it."""
-    taken = {p: r for r, p in pos.items()}
-    for _ in range(rounds):
-        moved = 0
-        for r in sorted(pos):
-            x, y = pos[r]
-            edges = adj.get(r, ())
-            if not edges:
-                continue
-            def happy(cx, cy):
-                return sum(1 for nb, dx, dy in edges
-                           if nb in pos and pos[nb] == (cx + dx, cy + dy))
-            now = happy(x, y)
-            if now == len(edges):
-                continue
-            best, bx, by = now, x, y
-            for nb, dx, dy in edges:
-                if nb not in pos:
-                    continue
-                cx, cy = pos[nb][0] - dx, pos[nb][1] - dy
-                if (cx, cy) in taken and taken[(cx, cy)] != r:
-                    continue
-                score = happy(cx, cy)
-                if score > best:
-                    best, bx, by = score, cx, cy
-            if (bx, by) != (x, y):
-                del taken[(x, y)]
-                pos[r] = (bx, by)
-                taken[(bx, by)] = r
-                moved += 1
-        if not moved:
-            break
-    return pos
-
-
-def layout_component(seed, adj, order):
-    """Breadth-first from one room, one cell per step. Returns {room: (x, y)}."""
-    pos = {seed: (0, 0)}
-    taken = {(0, 0): seed}
-    queue = [seed]
-    exact = 1
-    while queue:
-        cur = queue.pop(0)
-        cx, cy = pos[cur]
-        for rn, dx, dy in adj.get(cur, ()):
-            if rn in pos:
-                continue
-            spot = free_cell(taken, cx + dx, cy + dy, dx, dy)
-            if spot is None:
-                continue
-            x, y, was_ideal = spot
-            pos[rn] = (x, y)
-            taken[(x, y)] = rn
-            exact += 1 if was_ideal else 0
-            queue.append(rn)
-    # Rooms an exit points at but nothing points back from are still part of the
-    # component; anything left unplaced is dropped into the first free cell.
-    for rn in order:
-        if rn in pos:
-            continue
-        spot = free_cell(taken, 0, 0, 1, 0)
-        if spot is None:
-            continue
-        pos[rn] = (spot[0], spot[1])
-        taken[(spot[0], spot[1])] = rn
-    return pos, exact
+    areas.sort(key=lambda a: (-len(a), min(a)))
+    for i, pos in enumerate(areas):
+        for r, (x, y) in pos.items():
+            placed[r] = (i, x, y)
+    return placed, areas, nudged
 
 
 def pack(boxes, gap=4):
@@ -483,56 +488,61 @@ def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_nam
                     adj[ex[1]].append((rn, -dx, -dy))
 
         order = sorted(rows)
-        seen, comps = set(), []
-        for rn in order:
-            if rn in seen:
-                continue
-            stack, group = [rn], []
-            seen.add(rn)
-            while stack:
-                cur = stack.pop()
-                group.append(cur)
-                for nb, _, _ in adj.get(cur, ()):
-                    if nb not in seen:
-                        seen.add(nb)
-                        stack.append(nb)
-            # start from the busiest room: a hub lays out straighter than a
-            # dead end does
-            seed = max(sorted(group), key=lambda r: len(adj.get(r, ())))
-            comps.append((group, seed))
-        comps.sort(key=lambda g: (-len(g[0]), g[1]))
+        for rn in adj:
+            adj[rn] = sorted(set(adj[rn]))
+        placed_raw, area_pos, nudged = layout_map(order, adj)
 
-        placed, areas, boxes, raw = {}, [], [], []
-        for group, seed in comps:
-            sub = {r: [e for e in adj.get(r, ()) if e[0] in set(group)] for r in group}
-            pos, exact = layout_component(seed, sub, sorted(group))
-            pos = relax(pos, sub)
-            # Each planar exit is counted once per direction, the same way the
-            # exported exit list counts them.
-            exact = sum(1 for r in pos for nb, dx, dy in sub.get(r, ())
-                        if nb in pos and pos[nb] == (pos[r][0] + dx, pos[r][1] + dy)) // 2
-            xs = [p[0] for p in pos.values()] or [0]
-            ys = [p[1] for p in pos.values()] or [0]
+        boxes, raw = [], []
+        for pos in area_pos:
+            xs = [p[0] for p in pos.values()]
+            ys = [p[1] for p in pos.values()]
             x0, y0 = min(xs), min(ys)
             pos = {r: (x - x0, y - y0) for r, (x, y) in pos.items()}
-            w, h = max(xs) - x0 + 1, max(ys) - y0 + 1
-            raw.append((pos, group, seed, exact))
-            boxes.append((w, h))
+            raw.append(pos)
+            boxes.append((max(xs) - x0 + 1, max(ys) - y0 + 1))
 
-        offsets = pack(boxes)
-        for (pos, group, seed, exact), (w, h), (ox, oy) in zip(raw, boxes, offsets):
+        offsets = pack(boxes, gap=6)
+        placed, areas = {}, []
+        for pos, (w, h), (ox, oy) in zip(raw, boxes, offsets):
             ai = len(areas)
             for r, (x, y) in pos.items():
                 placed[r] = (x + ox, y + oy, ai)
             # An area is named for the commonest thing its rooms are called:
             # room names read "Orc Barracks, Bunk Room", so the part before the
             # comma is the place.
-            names = Counter(str(rt["Name"][rows[r]] or "").split(",")[0].strip()
-                            for r in group)
-            label = names.most_common(1)[0][0] if names else f"area {ai + 1}"
+            # A one- or two-room area is named for the room itself; a bigger one
+            # for the commonest place among its rooms, since room names read
+            # "Orc Barracks, Bunk Room".
+            if len(pos) <= 2:
+                label = str(rt["Name"][rows[min(pos)]] or "").strip()
+            else:
+                names = Counter(str(rt["Name"][rows[r]] or "").split(",")[0].strip()
+                                for r in pos)
+                top = names.most_common(2)
+                label = top[0][0] if top else ""
+                # A big area is often several places at once -- the town, the
+                # forest behind it and the graveyard beside them -- so name it
+                # after the two biggest rather than pretending it is one place.
+                if len(top) > 1 and top[0][1] < 0.4 * len(pos):
+                    label = f"{top[0][0]} / {top[1][0]}"
+            exact = sum(1 for r in pos for nb, dx, dy in adj.get(r, ())
+                        if nb in pos and pos[nb] == (pos[r][0] + dx, pos[r][1] + dy)) // 2
             areas.append({"label": label or f"area {ai + 1}", "x": ox, "y": oy,
-                          "w": w, "h": h, "rooms": len(group), "seed": seed,
-                          "exact": exact})
+                          "w": w, "h": h, "rooms": len(pos),
+                          "seed": min(pos), "exact": exact})
+
+        # The map is named after its biggest area, before the areas that share a
+        # name are numbered -- "Dragon's Teeth Hills", not "Dragon's Teeth Hills 1".
+        map_label = max(areas, key=lambda a: a["rooms"])["label"] if areas else ""
+
+        seen_labels = Counter()
+        for a in areas:
+            seen_labels[a["label"]] += 1
+        used = Counter()
+        for a in areas:
+            if seen_labels[a["label"]] > 1:
+                used[a["label"]] += 1
+                a["label"] = f'{a["label"]} {used[a["label"]]}'
 
         name_ids, name_list = {}, []
         ann_ids, ann_list = {}, [""]
@@ -616,6 +626,8 @@ def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_nam
         # cannot be, and is drawn as a stretched line instead.
         exact = sum(a["exact"] for a in areas)
         planar = sum(1 for e in exits_out if e[1] < 8 and e[2] == mp)
+        seams = sum(1 for e in exits_out if e[1] < 8 and e[2] == mp and e[3] in placed
+                    and placed[e[3]][2] != placed[e[0]][2])
 
         w = max((r[2] for r in rooms_out), default=0) + 1
         h = max((r[3] for r in rooms_out), default=0) + 1
@@ -636,8 +648,8 @@ def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_nam
         index.append({
             "n": mp, "rooms": len(rooms_out), "areas": len(areas),
             "w": w, "h": h, "exits": len(exits_out),
-            "exact": exact, "planar": planar,
-            "label": max(areas, key=lambda a: a["rooms"])["label"] if areas else "",
+            "exact": exact, "planar": planar, "seams": seams, "nudged": nudged,
+            "label": map_label,
         })
     return index, files
 
@@ -1045,8 +1057,10 @@ def main():
     laid = sum(m["rooms"] for m in map_index)
     exact = sum(m["exact"] for m in map_index)
     planar = sum(m["planar"] for m in map_index)
+    seams = sum(m["seams"] for m in map_index)
     print(f"  maps={len(map_index)}  rooms={laid}  areas={sum(m['areas'] for m in map_index)}  "
-          f"({100 * exact / max(1, planar):.1f}% of exits land one cell away in their own direction)")
+          f"({100 * 2 * exact / max(1, planar - seams):.1f}% of exits inside an area land one cell "
+          f"away in their own direction; {seams} cross between areas)")
     print(f"  wrote data/maps/*.js ({map_kb:.0f} KB across {len(map_files)} files)")
     print(f"  items={len(items)}  classes={len(classes)}  races={len(races)}  shops={len(shops)}")
     dropped = sum(1 for it in items if it.get("drop"))
