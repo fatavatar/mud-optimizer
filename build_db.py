@@ -9,7 +9,7 @@ modMain.GetAbilityStatSlot, frmMain.InvenAddEquip and frmMain.ItemIsUsableByChar
 Usage:  python3 build_db.py data-v1.11p.mdb  ->  data/gamedata.js
 """
 import json, os, sys, re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from access_parser import AccessParser
 
@@ -299,6 +299,347 @@ def build_item(r):
     if obtained: it["from"] = obtained
     it["abils"] = abils
     return it
+
+
+# ------------------------------------------------------------------- maps
+#
+# The rooms are a graph, not a picture: every room lists the room each of its
+# ten exits leads to and nothing else. Coordinates have to be invented, which is
+# what this does -- walk the graph and put each room one cell from its neighbour
+# in the direction the exit points, so the result reads like the map you draw in
+# your head while playing.
+#
+# Up and down get no cell of their own: they connect places that would sit on
+# top of each other. They stay as links you click instead, which is also how a
+# room reaches another map.
+
+# Screen coordinates: y grows south, the way a canvas does.
+PLANAR = [("N", 0, -1), ("S", 0, 1), ("E", 1, 0), ("W", -1, 0),
+          ("NE", 1, -1), ("NW", -1, -1), ("SE", 1, 1), ("SW", -1, 1)]
+DIR_NAMES = [d for d, _, _ in PLANAR] + ["U", "D"]
+EXIT_RE = re.compile(r"^(\d+)/(\d+)\s*(.*)$")
+
+
+def parse_exit(v):
+    """'1/1381 (Door)' -> (1, 1381, '(Door)'); anything else -> None.
+
+    A few exits are prefixed with the action that works them --
+    "Action [on the E exit of this room]: use fork east ... (Item: 983)" --
+    so the room/map pair is looked for anywhere in the string, not just at the
+    front."""
+    v = str(v or "").strip()
+    if not v or v == "0":
+        return None
+    m = EXIT_RE.match(v)
+    if m:
+        return int(m.group(1)), int(m.group(2)), m.group(3).strip()
+    m = re.search(r"(\d+)/(\d+)", v)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), v.strip()
+
+
+def free_cell(taken, x, y, dx, dy):
+    """A cell for a room whose ideal one is already occupied. Carrying on in the
+    same direction keeps the geometry honest -- a corridor that collides stays a
+    corridor -- and only when that fails does it spiral outwards."""
+    if (x, y) not in taken:
+        return x, y, True
+    for k in range(2, 6):
+        c = (x + dx * (k - 1), y + dy * (k - 1))
+        if c not in taken:
+            return c[0], c[1], False
+    for r in range(1, 8):
+        for ox in range(-r, r + 1):
+            for oy in range(-r, r + 1):
+                if max(abs(ox), abs(oy)) != r:
+                    continue
+                c = (x + ox, y + oy)
+                if c not in taken:
+                    return c[0], c[1], False
+    return None
+
+
+def relax(pos, adj, rounds=4):
+    """Nudge rooms that ended up in the wrong place. Every exit wants its
+    neighbour exactly one cell away in its own direction; a room with several
+    unhappy exits is offered each cell its neighbours would put it in, and takes
+    whichever free one satisfies the most of them. Dense areas -- a forest with
+    loops in it -- cannot be drawn on a grid at all, so this narrows the gap
+    rather than closing it."""
+    taken = {p: r for r, p in pos.items()}
+    for _ in range(rounds):
+        moved = 0
+        for r in sorted(pos):
+            x, y = pos[r]
+            edges = adj.get(r, ())
+            if not edges:
+                continue
+            def happy(cx, cy):
+                return sum(1 for nb, dx, dy in edges
+                           if nb in pos and pos[nb] == (cx + dx, cy + dy))
+            now = happy(x, y)
+            if now == len(edges):
+                continue
+            best, bx, by = now, x, y
+            for nb, dx, dy in edges:
+                if nb not in pos:
+                    continue
+                cx, cy = pos[nb][0] - dx, pos[nb][1] - dy
+                if (cx, cy) in taken and taken[(cx, cy)] != r:
+                    continue
+                score = happy(cx, cy)
+                if score > best:
+                    best, bx, by = score, cx, cy
+            if (bx, by) != (x, y):
+                del taken[(x, y)]
+                pos[r] = (bx, by)
+                taken[(bx, by)] = r
+                moved += 1
+        if not moved:
+            break
+    return pos
+
+
+def layout_component(seed, adj, order):
+    """Breadth-first from one room, one cell per step. Returns {room: (x, y)}."""
+    pos = {seed: (0, 0)}
+    taken = {(0, 0): seed}
+    queue = [seed]
+    exact = 1
+    while queue:
+        cur = queue.pop(0)
+        cx, cy = pos[cur]
+        for rn, dx, dy in adj.get(cur, ()):
+            if rn in pos:
+                continue
+            spot = free_cell(taken, cx + dx, cy + dy, dx, dy)
+            if spot is None:
+                continue
+            x, y, was_ideal = spot
+            pos[rn] = (x, y)
+            taken[(x, y)] = rn
+            exact += 1 if was_ideal else 0
+            queue.append(rn)
+    # Rooms an exit points at but nothing points back from are still part of the
+    # component; anything left unplaced is dropped into the first free cell.
+    for rn in order:
+        if rn in pos:
+            continue
+        spot = free_cell(taken, 0, 0, 1, 0)
+        if spot is None:
+            continue
+        pos[rn] = (spot[0], spot[1])
+        taken[(spot[0], spot[1])] = rn
+    return pos, exact
+
+
+def pack(boxes, gap=4):
+    """Shelf-pack the disconnected pieces of a map onto one plane, biggest
+    first, so panning the map shows all of it rather than one piece at a time."""
+    if not boxes:
+        return []
+    order = sorted(range(len(boxes)), key=lambda i: (-boxes[i][1] * boxes[i][0], i))
+    total = sum(w * h for w, h in boxes)
+    width = max(max(w for w, _ in boxes), int((total ** 0.5) * 1.6))
+    out = [None] * len(boxes)
+    x = y = row_h = 0
+    for i in order:
+        w, h = boxes[i]
+        if x and x + w > width:
+            x, y, row_h = 0, y + row_h + gap, 0
+        out[i] = (x, y)
+        x += w + gap
+        row_h = max(row_h, h)
+    return out
+
+
+def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_names):
+    rt = db.parse_table("Rooms")
+    tb = db.parse_table("TBInfo")
+    actions = {tb["Number"][i]: str(tb["Action"][i] or "")
+               for i in range(len(tb["Number"]))}
+
+    n = len(rt["Room Number"])
+    by_map = defaultdict(list)
+    for i in range(n):
+        by_map[int(num(rt["Map Number"][i]))].append(i)
+
+    index, files = [], []
+    for mp in sorted(by_map):
+        idxs = by_map[mp]
+        rows = {}
+        for i in idxs:
+            rows[int(num(rt["Room Number"][i]))] = i
+
+        # planar adjacency, this map only: up, down and cross-map exits are
+        # links you click, not steps on the grid
+        adj = defaultdict(list)
+        for rn, i in rows.items():
+            for d, dx, dy in PLANAR:
+                ex = parse_exit(rt[d][i])
+                if ex and ex[0] == mp and ex[1] in rows:
+                    adj[rn].append((ex[1], dx, dy))
+                    adj[ex[1]].append((rn, -dx, -dy))
+
+        order = sorted(rows)
+        seen, comps = set(), []
+        for rn in order:
+            if rn in seen:
+                continue
+            stack, group = [rn], []
+            seen.add(rn)
+            while stack:
+                cur = stack.pop()
+                group.append(cur)
+                for nb, _, _ in adj.get(cur, ()):
+                    if nb not in seen:
+                        seen.add(nb)
+                        stack.append(nb)
+            # start from the busiest room: a hub lays out straighter than a
+            # dead end does
+            seed = max(sorted(group), key=lambda r: len(adj.get(r, ())))
+            comps.append((group, seed))
+        comps.sort(key=lambda g: (-len(g[0]), g[1]))
+
+        placed, areas, boxes, raw = {}, [], [], []
+        for group, seed in comps:
+            sub = {r: [e for e in adj.get(r, ()) if e[0] in set(group)] for r in group}
+            pos, exact = layout_component(seed, sub, sorted(group))
+            pos = relax(pos, sub)
+            # Each planar exit is counted once per direction, the same way the
+            # exported exit list counts them.
+            exact = sum(1 for r in pos for nb, dx, dy in sub.get(r, ())
+                        if nb in pos and pos[nb] == (pos[r][0] + dx, pos[r][1] + dy)) // 2
+            xs = [p[0] for p in pos.values()] or [0]
+            ys = [p[1] for p in pos.values()] or [0]
+            x0, y0 = min(xs), min(ys)
+            pos = {r: (x - x0, y - y0) for r, (x, y) in pos.items()}
+            w, h = max(xs) - x0 + 1, max(ys) - y0 + 1
+            raw.append((pos, group, seed, exact))
+            boxes.append((w, h))
+
+        offsets = pack(boxes)
+        for (pos, group, seed, exact), (w, h), (ox, oy) in zip(raw, boxes, offsets):
+            ai = len(areas)
+            for r, (x, y) in pos.items():
+                placed[r] = (x + ox, y + oy, ai)
+            # An area is named for the commonest thing its rooms are called:
+            # room names read "Orc Barracks, Bunk Room", so the part before the
+            # comma is the place.
+            names = Counter(str(rt["Name"][rows[r]] or "").split(",")[0].strip()
+                            for r in group)
+            label = names.most_common(1)[0][0] if names else f"area {ai + 1}"
+            areas.append({"label": label or f"area {ai + 1}", "x": ox, "y": oy,
+                          "w": w, "h": h, "rooms": len(group), "seed": seed,
+                          "exact": exact})
+
+        name_ids, name_list = {}, []
+        ann_ids, ann_list = {}, [""]
+        ann_ids[""] = 0
+
+        def name_id(s):
+            if s not in name_ids:
+                name_ids[s] = len(name_list)
+                name_list.append(s)
+            return name_ids[s]
+
+        def ann_id(s):
+            if s not in ann_ids:
+                ann_ids[s] = len(ann_list)
+                ann_list.append(s)
+            return ann_ids[s]
+
+        rooms_out, exits_out = [], []
+        lair_out, item_out, spell_out, cmd_out = {}, {}, {}, {}
+        for rn in order:
+            i = rows[rn]
+            x, y, ai = placed.get(rn, (0, 0, 0))
+            light = int(num(rt["Light"][i]))
+            shop = int(num(rt["Shop"][i]))
+            npc = int(num(rt["NPC"][i]))
+            spell = int(num(rt["Spell"][i]))
+            cmd = int(num(rt["CMD"][i]))
+
+            lair = [int(x_) for x_ in re.findall(r"\d+", str(rt["Lair"][i] or "").split("[")[0].split(":")[-1])]
+            lair = [m for m in lair if m in monsters_by_num]
+            if lair:
+                lair_out[rn] = lair
+            items = [int(x_) for x_ in re.findall(r"\d+", str(rt["Placed"][i] or ""))]
+            items = [it for it in items if it in item_names]
+            if items:
+                item_out[rn] = items
+            if spell:
+                spell_out[rn] = spell
+            if cmd and actions.get(cmd):
+                # "go vortex:adddelay 5:minlevel 20 1220:message 1205" -- the
+                # part before the first colon is what you actually type.
+                cmds = []
+                for line in actions[cmd].splitlines():
+                    line = line.strip()
+                    if line:
+                        cmds.append(line.split(":")[0].strip())
+                if cmds:
+                    cmd_out[rn] = sorted(set(cmds))[:8]
+
+            flags = 0
+            if light < 0:
+                flags |= 1
+            if rn in lair_out:
+                flags |= 2
+            if rn in item_out:
+                flags |= 4
+            if rn in spell_out:
+                flags |= 8
+            if rn in cmd_out:
+                flags |= 16
+
+            for di, d in enumerate(DIR_NAMES):
+                ex = parse_exit(rt[d][i])
+                if not ex:
+                    continue
+                tm, tr, ann = ex
+                exits_out.append([rn, di, tm, tr, ann_id(ann)])
+                if d == "U":
+                    flags |= 32
+                elif d == "D":
+                    flags |= 64
+                if tm != mp:
+                    flags |= 128
+
+            rooms_out.append([rn, name_id(str(rt["Name"][i] or "").strip()),
+                              x, y, ai, flags, shop if shop in shops_by_num else 0,
+                              npc if npc in monsters_by_num else 0])
+
+        # How many exits could be drawn as a neat one-cell step, out of the
+        # planar ones inside this map -- a loop that does not close on a grid
+        # cannot be, and is drawn as a stretched line instead.
+        exact = sum(a["exact"] for a in areas)
+        planar = sum(1 for e in exits_out if e[1] < 8 and e[2] == mp)
+
+        w = max((r[2] for r in rooms_out), default=0) + 1
+        h = max((r[3] for r in rooms_out), default=0) + 1
+        payload = {
+            "n": mp, "w": w, "h": h,
+            "names": name_list, "anns": ann_list, "areas": areas,
+            "rooms": rooms_out, "exits": exits_out,
+            "lair": lair_out, "items": item_out, "spell": spell_out, "cmd": cmd_out,
+        }
+        path = os.path.join(outdir, "maps", f"map-{mp}.js")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("// Generated by build_db.py -- do not edit by hand.\n")
+            f.write("window.MAPDATA = window.MAPDATA || {};\nwindow.MAPDATA[%d] = " % mp)
+            json.dump(payload, f, separators=(",", ":"))
+            f.write(";\n")
+        files.append((mp, os.path.getsize(path)))
+        index.append({
+            "n": mp, "rooms": len(rooms_out), "areas": len(areas),
+            "w": w, "h": h, "exits": len(exits_out),
+            "exact": exact, "planar": planar,
+            "label": max(areas, key=lambda a: a["rooms"])["label"] if areas else "",
+        })
+    return index, files
 
 
 def main():
@@ -681,6 +1022,17 @@ def main():
         "spellAlignNot": SPELL_ALIGN_NOT,
     }
 
+    # ---------------------------------------------------------------- maps
+    map_index, map_files = export_maps(
+        db, outdir,
+        {m["n"] for m in monsters},
+        {sh["n"] for sh in shops},
+        spell_names,
+        {it["n"]: it["name"] for it in items},
+    )
+    payload["mapIndex"] = map_index
+    payload["mapDirs"] = DIR_NAMES
+
     js = os.path.join(outdir, "gamedata.js")
     with open(js, "w") as f:
         f.write("// Generated by build_db.py -- do not edit by hand.\n")
@@ -689,6 +1041,13 @@ def main():
         f.write(";\n")
 
     print(f"wrote {js}  ({os.path.getsize(js)/1024:.0f} KB)")
+    map_kb = sum(sz for _, sz in map_files) / 1024
+    laid = sum(m["rooms"] for m in map_index)
+    exact = sum(m["exact"] for m in map_index)
+    planar = sum(m["planar"] for m in map_index)
+    print(f"  maps={len(map_index)}  rooms={laid}  areas={sum(m['areas'] for m in map_index)}  "
+          f"({100 * exact / max(1, planar):.1f}% of exits land one cell away in their own direction)")
+    print(f"  wrote data/maps/*.js ({map_kb:.0f} KB across {len(map_files)} files)")
     print(f"  items={len(items)}  classes={len(classes)}  races={len(races)}  shops={len(shops)}")
     dropped = sum(1 for it in items if it.get("drop"))
     print(f"  monsters={len(monsters)}, {len(wanted_mons)} of them dropping something; "

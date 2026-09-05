@@ -469,6 +469,18 @@ function shopLocText(sh) {
   return (sh.locs || []).map(l => (l.name ? l.name + ' ' : '') + `(${l.map}/${l.room})`).join(', ');
 }
 
+/* A shop stands in a room, and that room is on a map we can draw. */
+function shopLocCell(sh, into) {
+  const td = into || el('span');
+  (sh.locs || []).forEach((l, i) => {
+    if (i) td.append(document.createTextNode(', '));
+    td.append(xref((l.name ? l.name + ' ' : '') + `(${l.map}/${l.room})`,
+      'show it on the map', () => goToRoom(l.map, l.room)));
+  });
+  if (!(sh.locs || []).length) td.append(document.createTextNode('location unknown'));
+  return td;
+}
+
 /* Native tooltip listing every shop that stocks the item, where it is, and what
  * it would cost you there. */
 function shopTooltip(it) {
@@ -2167,6 +2179,11 @@ function fromRefs(from) {
       frag.append(xref(label, `shop #${num}`, () => goToShop(sh)));
       return;
     }
+    const room = /^Room\s+(\d+)\s*\/\s*(\d+)$/i.exec(part);
+    if (room) {
+      frag.append(xref(part, 'show it on the map', () => goToRoom(+room[1], +room[2])));
+      return;
+    }
     frag.append(el('span', 'src none', part));
   });
   return frag;
@@ -2744,11 +2761,11 @@ function renderShops() {
       hdr.append(el('span', 'tag lim', 'off in the optimizer'));
     }
     if (sh.classRest) hdr.append(el('span', 'tag own', listOfClasses([sh.classRest]) + ' only'));
-    const meta = [];
-    meta.push(shopLocText(sh) || 'location unknown');
-    meta.push(`${sh.markup}% markup`);
-    meta.push(`${rows.length} item${rows.length === 1 ? '' : 's'}`);
-    hdr.append(el('span', 'meta', meta.join(' · ')));
+    const meta = el('span', 'meta');
+    shopLocCell(sh, meta);
+    meta.append(document.createTextNode(
+      ` · ${sh.markup}% markup · ${rows.length} item${rows.length === 1 ? '' : 's'}`));
+    hdr.append(meta);
     card.append(hdr);
 
     if (rows.length) {
@@ -2802,12 +2819,607 @@ function renderShops() {
   }
 }
 
+/* ------------------------------------------------------------------ maps */
+/* The rooms are a graph -- every room names the room each of its ten exits
+ * leads to, and nothing else -- so build_db.py walks that graph and invents a
+ * cell for each room, one step from its neighbour in the direction the exit
+ * points. This draws the result: pan, zoom, hover for what is in a room, click
+ * to follow a stair or a door into another part of the world.
+ *
+ * Up and down get no cell of their own, because they lead to somewhere that
+ * would sit on top of what is already there. They are markers you click. */
+
+const MAP_DIRS = D.mapDirs || ['N', 'S', 'E', 'W', 'NE', 'NW', 'SE', 'SW', 'U', 'D'];
+const DIR_STEP = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0],
+                   NE: [1, -1], NW: [-1, -1], SE: [1, 1], SW: [-1, 1] };
+const DIR_WORD = { N: 'north', S: 'south', E: 'east', W: 'west', NE: 'northeast',
+                   NW: 'northwest', SE: 'southeast', SW: 'southwest',
+                   U: 'up', D: 'down' };
+
+/* Room record: [number, nameIndex, x, y, areaIndex, flags, shop, monster] */
+const R_NUM = 0, R_NAME = 1, R_X = 2, R_Y = 3, R_AREA = 4, R_FLAG = 5, R_SHOP = 6, R_NPC = 7;
+const F_DARK = 1, F_LAIR = 2, F_ITEMS = 4, F_SPELL = 8, F_CMD = 16,
+      F_UP = 32, F_DOWN = 64, F_AWAY = 128;
+
+const MV = {
+  n: 0, want: 0, data: null, scale: 18, ox: 0, oy: 0,
+  cells: null, byNum: null, out: null, sel: null, hover: null, matches: null, missing: null,
+  drag: null, ctx: null, vw: 0, vh: 0,
+};
+
+const MIN_SCALE = 3, MAX_SCALE = 64;
+
+/* Map files are a couple of megabytes all told, so they are fetched one at a
+ * time, the first time you ask for one. A plain script tag rather than fetch,
+ * so opening index.html straight off disk keeps working. */
+const mapLoading = {};
+function loadMap(n, done) {
+  window.MAPDATA = window.MAPDATA || {};
+  if (window.MAPDATA[n]) return done(window.MAPDATA[n]);
+  if (mapLoading[n]) return mapLoading[n].push(done);
+  mapLoading[n] = [done];
+  const s = document.createElement('script');
+  s.src = `data/maps/map-${n}.js`;
+  const finish = () => {
+    const list = mapLoading[n] || [];
+    delete mapLoading[n];
+    for (const fn of list) fn(window.MAPDATA[n] || null);
+  };
+  s.onload = finish;
+  s.onerror = finish;
+  document.head.append(s);
+}
+
+/* Everything the viewer needs to look a room up quickly. */
+function indexMap(m) {
+  MV.data = m;
+  MV.n = m.n;
+  MV.byNum = new Map(m.rooms.map(r => [r[R_NUM], r]));
+  MV.cells = new Map(m.rooms.map(r => [r[R_X] + ',' + r[R_Y], r]));
+  MV.out = new Map();
+  for (const e of m.exits) {
+    if (!MV.out.has(e[0])) MV.out.set(e[0], []);
+    MV.out.get(e[0]).push(e);
+  }
+  MV.sel = null; MV.hover = null; MV.matches = null;
+}
+
+const roomName = r => MV.data.names[r[R_NAME]] || 'room ' + r[R_NUM];
+const exitsOf = num => MV.out.get(num) || [];
+const mapLabel = mi => `map ${mi.n} — ${mi.label} (${mi.rooms.toLocaleString()} rooms)`;
+
+/* What is worth saying about a room, in the order it matters. */
+function roomFacts(r) {
+  const m = MV.data, num = r[R_NUM], out = [];
+  if (r[R_SHOP]) {
+    const sh = shopByNum.get(r[R_SHOP]);
+    out.push({ k: 'shop', text: sh ? sh.name : 'shop #' + r[R_SHOP], shop: sh });
+  }
+  if (r[R_NPC]) {
+    const mon = monByNum.get(r[R_NPC]);
+    if (mon) out.push({ k: 'npc', text: mon.name, mon });
+  }
+  for (const mn of m.lair[num] || []) {
+    const mon = monByNum.get(mn);
+    if (mon) out.push({ k: 'lair', text: mon.name, mon });
+  }
+  for (const it of m.items[num] || []) {
+    const item = byNum.get(it);
+    if (item) out.push({ k: 'item', text: item.name, item });
+  }
+  if (m.spell[num]) out.push({ k: 'spell', text: spellName(m.spell[num]) });
+  for (const c of m.cmd[num] || []) out.push({ k: 'cmd', text: c });
+  if (r[R_FLAG] & F_DARK) out.push({ k: 'dark', text: 'dark — bring a light' });
+  return out;
+}
+
+/* ------------------------------------------------------------- the canvas */
+
+/* Canvas cannot read CSS variables, so the palette is lifted off the page once
+ * and cached. */
+let mapInk = null;
+function palette() {
+  if (mapInk) return mapInk;
+  const css = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (css.getPropertyValue(name) || '').trim() || fallback;
+  mapInk = {
+    bg: v('--bg-2', '#151922'), line: v('--line', '#2a3040'),
+    line2: v('--line-2', '#3a4256'), ink: v('--ink', '#d6dae3'),
+    dim: v('--ink-dim', '#8b93a5'), faint: v('--ink-faint', '#626b7d'),
+    amber: v('--amber', '#e8b45c'), green: v('--green', '#7cc98a'),
+    red: v('--red', '#e2705f'), blue: v('--blue', '#6fa8dc'),
+    violet: v('--violet', '#a68be0'),
+  };
+  return mapInk;
+}
+
+function roomColour(r) {
+  const p = palette();
+  if (r[R_SHOP]) return p.green;
+  if (r[R_NPC]) return p.red;
+  if (r[R_FLAG] & F_LAIR) return p.amber;
+  if (r[R_FLAG] & F_ITEMS) return p.blue;
+  if (r[R_FLAG] & F_CMD) return p.violet;
+  return (r[R_FLAG] & F_DARK) ? '#39404f' : p.dim;
+}
+
+const sx = wx => (wx - MV.ox) * MV.scale;
+const sy = wy => (wy - MV.oy) * MV.scale;
+
+function resizeCanvas() {
+  const box = $('#mapview'), cv = $('#mapcanvas');
+  if (!box || !cv) return;
+  // Fill what is left of the window rather than guessing at the height of the
+  // controls above it, which wrap on a narrow screen. The map is then the only
+  // thing that pans, and the page itself never scrolls on this tab.
+  const top = box.getBoundingClientRect().top;
+  if (top > 0) box.style.height = Math.max(320, window.innerHeight - top - 16) + 'px';
+  const dpr = window.devicePixelRatio || 1;
+  const w = box.clientWidth, h = box.clientHeight;
+  if (!w || !h) return;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  cv.style.width = w + 'px';
+  cv.style.height = h + 'px';
+  MV.ctx = cv.getContext('2d');
+  MV.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  MV.vw = w; MV.vh = h;
+}
+
+function drawMap() {
+  const ctx = MV.ctx, m = MV.data;
+  if (!ctx || !m) return;
+  const p = palette(), s = MV.scale;
+  ctx.clearRect(0, 0, MV.vw, MV.vh);
+  ctx.fillStyle = p.bg;
+  ctx.fillRect(0, 0, MV.vw, MV.vh);
+
+  // Only what is on screen, with a margin so lines leaving the view still start
+  // in the right place.
+  const pad = 3;
+  const x0 = MV.ox - pad, x1 = MV.ox + MV.vw / s + pad;
+  const y0 = MV.oy - pad, y1 = MV.oy + MV.vh / s + pad;
+  const inView = r => r[R_X] >= x0 && r[R_X] <= x1 && r[R_Y] >= y0 && r[R_Y] <= y1;
+
+  // area outlines, and their names while the rooms are too small to read
+  ctx.lineWidth = 1;
+  for (const a of m.areas) {
+    const ax = sx(a.x - 0.6), ay = sy(a.y - 0.6);
+    const aw = (a.w + 1.2) * s, ah = (a.h + 1.2) * s;
+    if (ax > MV.vw || ay > MV.vh || ax + aw < 0 || ay + ah < 0) continue;
+    ctx.strokeStyle = p.line;
+    ctx.strokeRect(ax, ay, aw, ah);
+    if (s < 9) {
+      ctx.fillStyle = p.faint;
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillText(`${a.label} (${a.rooms})`, ax + 4, ay + 13);
+    }
+  }
+
+  // exits first, so rooms sit on top of them
+  ctx.strokeStyle = p.line2;
+  ctx.lineWidth = Math.max(1, s / 18);
+  ctx.beginPath();
+  for (const r of m.rooms) {
+    if (!inView(r)) continue;
+    const cx = sx(r[R_X] + 0.5), cy = sy(r[R_Y] + 0.5);
+    for (const e of exitsOf(r[R_NUM])) {
+      const dir = MAP_DIRS[e[1]];
+      if (!DIR_STEP[dir] || e[2] !== m.n) continue;
+      const t = MV.byNum.get(e[3]);
+      if (!t) continue;
+      // one line per pair: draw it from the lower room number only
+      if (t[R_NUM] < r[R_NUM] && exitsOf(t[R_NUM]).some(x => x[2] === m.n && x[3] === r[R_NUM])) continue;
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(sx(t[R_X] + 0.5), sy(t[R_Y] + 0.5));
+    }
+  }
+  ctx.stroke();
+
+  // rooms
+  const box = Math.max(2, s * 0.66);
+  const half = box / 2;
+  for (const r of m.rooms) {
+    if (!inView(r)) continue;
+    const cx = sx(r[R_X] + 0.5), cy = sy(r[R_Y] + 0.5);
+    ctx.fillStyle = roomColour(r);
+    ctx.fillRect(cx - half, cy - half, box, box);
+    if (r[R_FLAG] & F_DARK) {
+      ctx.strokeStyle = p.line2;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx - half + 0.5, cy - half + 0.5, box - 1, box - 1);
+    }
+    // stairs and doorways out of this plane: a wedge you can click
+    if (s >= 8 && (r[R_FLAG] & (F_UP | F_DOWN | F_AWAY))) {
+      ctx.fillStyle = p.ink;
+      const t = Math.max(2, s * 0.16);
+      if (r[R_FLAG] & F_UP) {
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - half - t - 1); ctx.lineTo(cx - t, cy - half - 1);
+        ctx.lineTo(cx + t, cy - half - 1); ctx.closePath(); ctx.fill();
+      }
+      if (r[R_FLAG] & F_DOWN) {
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + half + t + 1); ctx.lineTo(cx - t, cy + half + 1);
+        ctx.lineTo(cx + t, cy + half + 1); ctx.closePath(); ctx.fill();
+      }
+      if (r[R_FLAG] & F_AWAY) {
+        ctx.fillStyle = p.violet;
+        ctx.fillRect(cx + half + 1, cy - t, t, t * 2);
+      }
+    }
+  }
+
+  // what the search found
+  if (MV.matches && MV.matches.size) {
+    ctx.strokeStyle = p.amber;
+    ctx.lineWidth = 2;
+    for (const r of m.rooms) {
+      if (!inView(r) || !MV.matches.has(r[R_NUM])) continue;
+      ctx.strokeRect(sx(r[R_X] + 0.5) - half - 3, sy(r[R_Y] + 0.5) - half - 3, box + 6, box + 6);
+    }
+  }
+
+  for (const [r, colour, width] of [[MV.hover, p.ink, 1.5], [MV.sel, p.amber, 2.5]]) {
+    if (!r || !MV.byNum.has(r[R_NUM]) || !inView(r)) continue;
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = width;
+    ctx.strokeRect(sx(r[R_X] + 0.5) - half - 2, sy(r[R_Y] + 0.5) - half - 2, box + 4, box + 4);
+  }
+
+  // names, once there is room for them
+  if (s >= 26 && $('#mp-labels').checked) {
+    ctx.fillStyle = p.ink;
+    ctx.font = `${Math.min(13, Math.round(s / 2.4))}px ui-monospace, monospace`;
+    ctx.textAlign = 'center';
+    for (const r of m.rooms) {
+      if (!inView(r)) continue;
+      const full = roomName(r);
+      const short = full.includes(',') ? full.slice(full.indexOf(',') + 1).trim() : full;
+      ctx.fillText(short.slice(0, 18), sx(r[R_X] + 0.5), sy(r[R_Y] + 0.5) + half + 12);
+    }
+    ctx.textAlign = 'left';
+  }
+}
+
+/* ------------------------------------------------------------- navigation */
+
+function clampScale(v) { return Math.max(MIN_SCALE, Math.min(MAX_SCALE, v)); }
+
+function zoomAt(px, py, factor) {
+  const before = { x: MV.ox + px / MV.scale, y: MV.oy + py / MV.scale };
+  MV.scale = clampScale(MV.scale * factor);
+  MV.ox = before.x - px / MV.scale;
+  MV.oy = before.y - py / MV.scale;
+  drawMap();
+}
+
+function centreOn(wx, wy, scale) {
+  if (scale) MV.scale = clampScale(scale);
+  MV.ox = wx - MV.vw / (2 * MV.scale);
+  MV.oy = wy - MV.vh / (2 * MV.scale);
+  drawMap();
+}
+
+function fitBox(x, y, w, h) {
+  const pad = 2;
+  MV.scale = clampScale(Math.min(MV.vw / (w + pad * 2), MV.vh / (h + pad * 2)));
+  centreOn(x + w / 2, y + h / 2);
+}
+
+function fitAll() {
+  const m = MV.data;
+  if (m) fitBox(0, 0, m.w, m.h);
+}
+
+function selectRoom(r, recentre) {
+  MV.sel = r;
+  if (r && recentre) centreOn(r[R_X] + 0.5, r[R_Y] + 0.5, Math.max(MV.scale, 22));
+  else drawMap();
+  renderRoomDetail();
+}
+
+/* Go to a room, loading its map first if the room is on another one. This is
+ * what an up, a down or a doorway into the next map does. */
+function travelTo(mapNum, roomNum) {
+  const go = () => {
+    const r = MV.byNum.get(roomNum);
+    MV.missing = r ? null : { map: mapNum, room: roomNum };
+    if (r) selectRoom(r, true);
+    else { MV.sel = null; drawMap(); renderRoomDetail(); }
+  };
+  if (mapNum === MV.n && MV.data) return go();
+  showMap(mapNum, () => {
+    $('#mp-map').value = String(mapNum);
+    go();
+  });
+}
+
+/* --------------------------------------------------------- room detail */
+
+/* The panel under the map: everything in the room, and every way out of it,
+ * as links. An exit link is how you get from one area to another when the way
+ * on is up, down, or through a door into the next map. */
+function renderRoomDetail() {
+  const box = $('#mp-detail');
+  const r = MV.sel;
+  if (!r) {
+    box.innerHTML = '';
+    // A handful of exits in the database lead to rooms that were never built.
+    if (MV.missing) {
+      box.hidden = false;
+      box.append(el('div', 'mapdetail-head',
+        `${MV.missing.map}/${MV.missing.room} is not in the database`));
+      box.append(el('div', 'fact', 'the exit leading here points at a room that does not exist'));
+    } else {
+      box.hidden = true;
+    }
+    return;
+  }
+  MV.missing = null;
+  box.hidden = false;
+  box.innerHTML = '';
+
+  const head = el('div', 'mapdetail-head');
+  head.append(el('strong', null, roomName(r)));
+  head.append(el('span', 'meta', `${MV.n}/${r[R_NUM]}`));
+  const close = el('button', 'btn tiny', '×');
+  close.title = 'close';
+  close.addEventListener('click', () => { MV.sel = null; drawMap(); renderRoomDetail(); });
+  head.append(close);
+  box.append(head);
+
+  const facts = roomFacts(r);
+  if (facts.length) {
+    const list = el('div', 'mapdetail-facts');
+    for (const f of facts) {
+      const row = el('div', 'fact');
+      row.append(el('span', 'fact-k', f.k === 'cmd' ? 'do' : f.k));
+      if (f.mon) row.append(xref(f.text, 'monsters tab', () => goToMonster(f.mon)));
+      else if (f.shop) row.append(xref(f.text, 'shops tab', () => goToShop(f.shop)));
+      else if (f.item) row.append(xref(f.text, itemTab(f.item) + ' tab', () => goToItem(f.item)));
+      else row.append(el('span', null, f.text));
+      list.append(row);
+    }
+    box.append(list);
+  }
+
+  const exits = exitsOf(r[R_NUM]);
+  const ways = el('div', 'mapdetail-exits');
+  for (const e of exits) {
+    const dir = MAP_DIRS[e[1]];
+    const ann = MV.data.anns[e[4]] || '';
+    const row = el('div', 'fact');
+    row.append(el('span', 'fact-k', DIR_WORD[dir] || dir));
+    const here = e[2] === MV.n;
+    const known = here ? MV.byNum.get(e[3]) : null;
+    if (here && !known) {
+      // Five exits in the database lead to rooms that were never built.
+      row.append(el('span', 'fact-note', `${e[2]}/${e[3]} — no such room`));
+    } else {
+      row.append(xref(known ? roomName(known) : `${e[2]}/${e[3]}`,
+        here ? 'go there' : `map ${e[2]}`, () => travelTo(e[2], e[3])));
+    }
+    if (ann) row.append(el('span', 'fact-note', ann));
+    ways.append(row);
+  }
+  if (!exits.length) ways.append(el('div', 'fact', 'no exits'));
+  box.append(ways);
+}
+
+/* ------------------------------------------------------------- the tooltip */
+
+function tipFor(r) {
+  const lines = [roomName(r) + `  (${MV.n}/${r[R_NUM]})`];
+  const facts = roomFacts(r);
+  for (const f of facts) lines.push(`${f.k === 'cmd' ? 'do' : f.k}: ${f.text}`);
+  const ways = exitsOf(r[R_NUM]).map(e => {
+    const ann = MV.data.anns[e[4]] || '';
+    return `${DIR_WORD[MAP_DIRS[e[1]]] || MAP_DIRS[e[1]]} → ${e[2]}/${e[3]}${ann ? ' ' + ann : ''}`;
+  });
+  if (ways.length) lines.push(ways.join('   '));
+  return lines;
+}
+
+function showTip(r, px, py) {
+  const tip = $('#maptip');
+  if (!r) { tip.hidden = true; return; }
+  tip.innerHTML = '';
+  const lines = tipFor(r);
+  tip.append(el('div', 'tip-name', lines[0]));
+  for (const line of lines.slice(1)) tip.append(el('div', 'tip-line', line));
+  tip.hidden = false;
+  // keep it on screen
+  const w = tip.offsetWidth || 220, h = tip.offsetHeight || 60;
+  tip.style.left = Math.min(px + 14, Math.max(0, MV.vw - w - 6)) + 'px';
+  tip.style.top = Math.min(py + 14, Math.max(0, MV.vh - h - 6)) + 'px';
+}
+
+/* Which room is under the pointer, and whether the pointer is on one of its
+ * stair markers rather than the room itself. */
+function hitTest(px, py) {
+  const wx = MV.ox + px / MV.scale, wy = MV.oy + py / MV.scale;
+  const r = MV.cells.get(Math.floor(wx) + ',' + Math.floor(wy));
+  if (!r) return null;
+  const dy = wy - r[R_Y] - 0.5;
+  let stair = null;
+  if ((r[R_FLAG] & F_UP) && dy < -0.28) stair = 'U';
+  else if ((r[R_FLAG] & F_DOWN) && dy > 0.28) stair = 'D';
+  return { room: r, stair };
+}
+
+/* --------------------------------------------------------------- the tab */
+
+function mapNote() {
+  const mi = (D.mapIndex || []).find(x => x.n === MV.n);
+  if (!mi) return '';
+  const bits = [`${mi.rooms.toLocaleString()} rooms`, `${mi.areas} areas`];
+  const tier = mapByNum.get(mi.n);
+  if (tier) bits.push(tier.tier);
+  if (MV.matches) bits.push(`${MV.matches.size} found`);
+  return bits.join(' · ');
+}
+
+function showMap(n, then) {
+  MV.want = n;
+  loadMap(n, m => {
+    // Two maps can be in flight at once -- opening the tab starts one, and a
+    // link straight to a room on another map starts the next. Only the map
+    // last asked for gets to draw itself.
+    if (MV.want !== n) return;
+    if (!m) {
+      $('#mp-note').textContent = `map ${n} did not load — data/maps/map-${n}.js is missing`;
+      return;
+    }
+    indexMap(m);
+    const sel = $('#mp-area');
+    sel.innerHTML = '<option value="">whole map</option>';
+    m.areas.forEach((a, i) => sel.append(new Option(`${a.label} (${a.rooms})`, i)));
+    resizeCanvas();
+    fitAll();
+    $('#mp-note').textContent = mapNote();
+    renderRoomDetail();
+    if (then) then();
+  });
+}
+
+function searchRooms() {
+  const q = $('#mp-q').value.trim().toLowerCase();
+  if (!q || !MV.data) { MV.matches = null; $('#mp-note').textContent = mapNote(); drawMap(); return; }
+  // "1/2337" is a room reference, not a name -- go straight there.
+  const ref = /^(\d+)\s*\/\s*(\d+)$/.exec(q);
+  if (ref) { travelTo(+ref[1], +ref[2]); return; }
+  const hits = MV.data.rooms.filter(r => roomName(r).toLowerCase().includes(q));
+  MV.matches = new Set(hits.map(r => r[R_NUM]));
+  $('#mp-note').textContent = mapNote();
+  if (hits.length) selectRoom(hits[0], true);
+  else drawMap();
+}
+
+function renderMapKey() {
+  const key = $('#mapkey');
+  if (!key || key.childNodes.length) return;
+  const p = palette();
+  const rows = [[p.green, 'shop'], [p.red, 'monster'], [p.amber, 'lair'],
+                [p.blue, 'items'], [p.violet, 'something to do'], [p.dim, 'room'],
+                ['#39404f', 'dark']];
+  for (const [colour, label] of rows) {
+    const row = el('span', 'key');
+    const dot = el('span', 'key-dot');
+    dot.style.background = colour;
+    row.append(dot, document.createTextNode(label));
+    key.append(row);
+  }
+}
+
+let mapWired = false;
+function renderMaps() {
+  const sel = $('#mp-map');
+  if (!sel.options.length) {
+    for (const mi of D.mapIndex || []) sel.append(new Option(mapLabel(mi), mi.n));
+  }
+  renderMapKey();
+  wireMap();
+  if (!MV.data) {
+    const first = (D.mapIndex || [])[0];
+    if (first) { sel.value = String(first.n); showMap(first.n); }
+    return;
+  }
+  resizeCanvas();
+  drawMap();
+  $('#mp-note').textContent = mapNote();
+}
+
+function wireMap() {
+  if (mapWired) return;
+  mapWired = true;
+  const cv = $('#mapcanvas');
+
+  $('#mp-map').addEventListener('change', e => showMap(+e.target.value));
+  $('#mp-area').addEventListener('change', e => {
+    const a = MV.data && MV.data.areas[+e.target.value];
+    if (a) fitBox(a.x, a.y, a.w, a.h); else fitAll();
+  });
+  $('#mp-q').addEventListener('input', searchRooms);
+  $('#mp-labels').addEventListener('input', drawMap);
+  $('#mp-in').addEventListener('click', () => zoomAt(MV.vw / 2, MV.vh / 2, 1.4));
+  $('#mp-out').addEventListener('click', () => zoomAt(MV.vw / 2, MV.vh / 2, 1 / 1.4));
+  $('#mp-fit').addEventListener('click', fitAll);
+
+  cv.addEventListener('pointerdown', e => {
+    cv.setPointerCapture(e.pointerId);
+    MV.drag = { x: e.offsetX, y: e.offsetY, ox: MV.ox, oy: MV.oy, moved: false };
+  });
+  cv.addEventListener('pointermove', e => {
+    if (MV.drag) {
+      const dx = e.offsetX - MV.drag.x, dy = e.offsetY - MV.drag.y;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) MV.drag.moved = true;
+      MV.ox = MV.drag.ox - dx / MV.scale;
+      MV.oy = MV.drag.oy - dy / MV.scale;
+      $('#maptip').hidden = true;
+      drawMap();
+      return;
+    }
+    const hit = hitTest(e.offsetX, e.offsetY);
+    const room = hit ? hit.room : null;
+    cv.style.cursor = hit ? (hit.stair ? 'alias' : 'pointer') : 'grab';
+    if (room !== MV.hover) { MV.hover = room; drawMap(); }
+    showTip(room, e.offsetX, e.offsetY);
+  });
+  const endDrag = e => {
+    if (!MV.drag) return;
+    const moved = MV.drag.moved;
+    MV.drag = null;
+    if (moved) return;
+    const hit = hitTest(e.offsetX, e.offsetY);
+    if (!hit) return;
+    // Clicking the wedge on a room takes the stair; clicking the room itself
+    // opens it.
+    if (hit.stair) {
+      const way = exitsOf(hit.room[R_NUM]).find(x => MAP_DIRS[x[1]] === hit.stair);
+      if (way) { travelTo(way[2], way[3]); return; }
+    }
+    selectRoom(hit.room, false);
+  };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', () => { MV.drag = null; });
+  cv.addEventListener('pointerleave', () => { MV.hover = null; $('#maptip').hidden = true; drawMap(); });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoomAt(e.offsetX, e.offsetY, e.deltaY < 0 ? 1.18 : 1 / 1.18);
+  }, { passive: false });
+  cv.addEventListener('dblclick', e => zoomAt(e.offsetX, e.offsetY, 1.6));
+
+  cv.tabIndex = 0;
+  cv.addEventListener('keydown', e => {
+    const step = 4 / MV.scale * 40;
+    const pan = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+    if (pan) { MV.ox += pan[0] * step; MV.oy += pan[1] * step; drawMap(); e.preventDefault(); return; }
+    if (e.key === '+' || e.key === '=') { zoomAt(MV.vw / 2, MV.vh / 2, 1.4); e.preventDefault(); }
+    if (e.key === '-') { zoomAt(MV.vw / 2, MV.vh / 2, 1 / 1.4); e.preventDefault(); }
+    if (e.key === 'Escape' && MV.sel) { MV.sel = null; drawMap(); renderRoomDetail(); }
+  });
+
+  window.addEventListener('resize', () => {
+    if (!MV.data || !$('#tab-maps').classList.contains('is-active')) return;
+    resizeCanvas(); drawMap();
+  });
+}
+
+/* A room reference from anywhere else on the page -- a shop's location, an
+ * item's "Room 1/2231" -- opens the map on that room. */
+function goToRoom(mapNum, roomNum) {
+  activateTab('maps');
+  $('#mp-map').value = String(mapNum);
+  travelTo(mapNum, roomNum);
+}
+
 /* ----------------------------------------------------------------- wire */
 
 const TAB_RENDER = {
   spells: renderSpells, weapons: renderWeapons, armour: renderArmour,
   sundry: renderSundry, classes: renderClassRace, monsters: renderMonsters,
-  shops: renderShops,
+  shops: renderShops, maps: renderMaps,
 };
 
 /* Every reference tab is quoted for the active character, so switching roster

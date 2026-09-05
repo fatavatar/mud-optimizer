@@ -35,6 +35,7 @@
     <button class="tab" data-tab="classes">Classes &amp; Races</button>
     <button class="tab" data-tab="monsters">Monsters</button>
     <button class="tab" data-tab="shops">Shops</button>
+    <button class="tab" data-tab="maps">Maps</button>
   </nav>
 </header>
 
@@ -320,6 +321,37 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
   </div>
   <p class="hint" id="sh-note"></p>
   <div id="shops"></div>
+</section>
+
+<!-- ------------------------------------------------ MAPS -->
+<section class="panel" id="tab-maps">
+  <div class="controls">
+    <div class="ctl">
+      <label class="ctl-label" for="mp-map">Map</label>
+      <select id="mp-map"></select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="mp-area">Area</label>
+      <select id="mp-area"></select>
+    </div>
+    <div class="ctl grow">
+      <label class="ctl-label" for="mp-q">Find</label>
+      <input type="search" id="mp-q" placeholder="room name, or 1/2337&hellip;">
+    </div>
+    <label class="chk"><input type="checkbox" id="mp-labels" checked> names</label>
+    <div class="zoomer">
+      <button class="btn tiny" id="mp-out" title="zoom out">&minus;</button>
+      <button class="btn tiny" id="mp-in" title="zoom in">+</button>
+      <button class="btn tiny" id="mp-fit" title="fit the whole map">Fit</button>
+    </div>
+  </div>
+  <p class="hint" id="mp-note"></p>
+  <div class="mapview" id="mapview">
+    <canvas id="mapcanvas"></canvas>
+    <div class="maptip" id="maptip" hidden></div>
+    <div class="mapkey" id="mapkey"></div>
+    <div class="mapdetail" id="mp-detail" hidden></div>
+  </div>
 </section>
 
 </main>

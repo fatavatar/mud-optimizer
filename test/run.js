@@ -1069,6 +1069,153 @@ ok(shopRefs > 1000 && badShops.length > 0,
    'some shop references point outside the shop table and stay plain text',
    `${badShops.length} of ${shopRefs}`);
 
+/* ------------------------------------------------------------------ maps */
+section('The maps');
+
+// The map files are loaded the way the page loads them: one plain script each.
+for (const mi of D.mapIndex) {
+  vm.runInContext(fs.readFileSync(path.join(root, `data/maps/map-${mi.n}.js`), 'utf8'), ctx);
+}
+const MAPS = ctx.window.MAPDATA;
+const R_NUM = 0, R_NAME = 1, R_X = 2, R_Y = 3, R_AREA = 4, R_FLAG = 5, R_SHOP = 6, R_NPC = 7;
+const F_DARK = 1, F_LAIR = 2, F_ITEMS = 4, F_SPELL = 8, F_CMD = 16, F_UP = 32, F_DOWN = 64, F_AWAY = 128;
+const STEP = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0],
+               NE: [1, -1], NW: [-1, -1], SE: [1, 1], SW: [-1, 1] };
+
+eq(Object.keys(MAPS).length, D.mapIndex.length, 'every map in the index has a file');
+eq(D.mapIndex.reduce((a, m) => a + m.rooms, 0), 26694, 'all 26,694 rooms are exported');
+ok(D.mapDirs.join(',') === 'N,S,E,W,NE,NW,SE,SW,U,D', 'the ten directions are in a known order');
+
+// A room's cell is invented by the layout, so the invariant that matters is
+// that no two rooms are put in the same one -- a click has to mean one room.
+let shared = 0, badArea = 0, outsideBox = 0;
+for (const mi of D.mapIndex) {
+  const m = MAPS[mi.n];
+  eq(m.rooms.length, mi.rooms, `map ${mi.n} holds the rooms the index promises`);
+  const cells = new Set();
+  for (const r of m.rooms) {
+    const key = r[R_X] + ',' + r[R_Y];
+    if (cells.has(key)) shared++;
+    cells.add(key);
+    const a = m.areas[r[R_AREA]];
+    if (!a) { badArea++; continue; }
+    if (r[R_X] < a.x || r[R_X] >= a.x + a.w || r[R_Y] < a.y || r[R_Y] >= a.y + a.h) outsideBox++;
+  }
+}
+eq(shared, 0, 'no two rooms are drawn in the same cell');
+eq(badArea, 0, 'every room belongs to an area');
+eq(outsideBox, 0, 'and sits inside that area’s box, so the area picker frames it');
+
+// The point of the layout: an exit should be a step in its own direction.
+let clean = 0, stretched = 0;
+for (const mi of D.mapIndex) {
+  const m = MAPS[mi.n];
+  const pos = new Map(m.rooms.map(r => [r[R_NUM], [r[R_X], r[R_Y]]]));
+  for (const [from, di, tm, to] of m.exits) {
+    const step = STEP[D.mapDirs[di]];
+    if (!step || tm !== mi.n) continue;
+    const a = pos.get(from), b = pos.get(to);
+    if (!a || !b) continue;
+    if (b[0] - a[0] === step[0] && b[1] - a[1] === step[1]) clean++; else stretched++;
+  }
+}
+const cleanPct = 100 * clean / (clean + stretched);
+ok(cleanPct > 90, 'most exits land one cell away in their own direction',
+   `${cleanPct.toFixed(1)}%`);
+// The rest are loops a grid cannot close, and are drawn as stretched lines
+// rather than dropped.
+ok(stretched > 0, 'the ones that cannot are kept, not thrown away', String(stretched));
+
+// Every exit has somewhere to go, on this map or another.
+let danglingSame = 0, danglingAway = 0, badAnn = 0;
+for (const mi of D.mapIndex) {
+  const m = MAPS[mi.n];
+  const here = new Set(m.rooms.map(r => r[R_NUM]));
+  for (const [, di, tm, to, ann] of m.exits) {
+    if (ann >= m.anns.length) badAnn++;
+    if (tm === mi.n) { if (!here.has(to)) danglingSame++; }
+    else {
+      const other = MAPS[tm];
+      if (other && !other.rooms.some(r => r[R_NUM] === to)) danglingAway++;
+    }
+    void di;
+  }
+}
+// Five exits in the database lead to rooms that were never built -- 1/164,
+// 1/288 and 1/2779, off a tournament room, a library, a gang house, the portal
+// room and map 17's "Module Test Room". They are kept as the data has them and
+// the map refuses to link them, rather than being quietly dropped.
+eq(danglingSame + danglingAway, 5, 'the five exits to rooms that were never built are still there',
+   `${danglingSame} inside a map, ${danglingAway} across maps`);
+eq(badAnn, 0, 'every exit annotation resolves');
+
+// Flags are what the renderer colours and marks rooms by, so they have to agree
+// with the data they summarise.
+let flagWrong = 0;
+for (const mi of D.mapIndex) {
+  const m = MAPS[mi.n];
+  const ups = new Set(), downs = new Set(), away = new Set();
+  for (const [from, di, tm] of m.exits) {
+    if (D.mapDirs[di] === 'U') ups.add(from);
+    if (D.mapDirs[di] === 'D') downs.add(from);
+    if (tm !== mi.n) away.add(from);
+  }
+  for (const r of m.rooms) {
+    const n = r[R_NUM], f = r[R_FLAG];
+    if (!!(f & F_UP) !== ups.has(n)) flagWrong++;
+    if (!!(f & F_DOWN) !== downs.has(n)) flagWrong++;
+    if (!!(f & F_AWAY) !== away.has(n)) flagWrong++;
+    if (!!(f & F_LAIR) !== !!m.lair[n]) flagWrong++;
+    if (!!(f & F_ITEMS) !== !!m.items[n]) flagWrong++;
+    if (!!(f & F_SPELL) !== !!m.spell[n]) flagWrong++;
+    if (!!(f & F_CMD) !== !!m.cmd[n]) flagWrong++;
+  }
+}
+eq(flagWrong, 0, 'the flags a room is drawn from match what it holds');
+
+// What a room holds has to be something the rest of the tool knows about, or
+// the tooltip would name a number.
+let badShop = 0, badMon = 0, badItem = 0, darkRooms = 0, cmdRooms = 0;
+for (const mi of D.mapIndex) {
+  const m = MAPS[mi.n];
+  for (const r of m.rooms) {
+    if (r[R_SHOP] && !X.shopByNum.has(r[R_SHOP])) badShop++;
+    if (r[R_NPC] && !X.monByNum.has(r[R_NPC])) badMon++;
+    if (r[R_FLAG] & F_DARK) darkRooms++;
+    if (r[R_FLAG] & F_CMD) cmdRooms++;
+  }
+  for (const list of Object.values(m.items)) {
+    for (const n of list) if (!D.items.some(i => i.n === n)) badItem++;
+  }
+}
+eq(badShop, 0, 'every shop in a room is a shop we hold');
+eq(badMon, 0, 'every monster placed in a room is one we hold');
+eq(badItem, 0, 'and every item lying in a room is one we hold');
+ok(darkRooms > 10000, 'the dark rooms are marked — most of the world is unlit',
+   String(darkRooms));
+ok(cmdRooms > 300, 'and the rooms with something to do in them carry their commands',
+   String(cmdRooms));
+
+// Cross-check against the shop table: a shop says which room it stands in, and
+// that room should be the one flagged with it.
+let agreed = 0, disagreed = 0;
+for (const sh of D.shops) {
+  for (const loc of sh.locs || []) {
+    const m = MAPS[loc.map];
+    if (!m) continue;
+    const room = m.rooms.find(r => r[R_NUM] === loc.room);
+    if (!room) { disagreed++; continue; }
+    if (room[R_SHOP] === sh.n) agreed++; else disagreed++;
+  }
+}
+ok(agreed > 80, 'the room a shop stands in is flagged with that shop', String(agreed));
+eq(disagreed, 0, '...for every shop location in the table');
+
+// The commands are the "what do I do here" the tooltip exists for.
+const portal = MAPS[1].cmd[2337];
+ok(portal && portal.some(c => /dice/.test(c)),
+   'the Portal Room lists the things you can type in it', (portal || []).join(', '));
+
 /* ------------------------------------------------------------------ report */
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

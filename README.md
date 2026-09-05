@@ -41,7 +41,7 @@ https://github.com/Tehshortbus/Majormud_MDB_Repo/raw/refs/heads/main/data-v1.11p
 ```
 
 The shipped data was built from `data-v1.11p.mdb` (dat `v1.11p`, nmr `v1.8.3`,
-sha256 `eba20f06…`), 1,950 items. `init.sh` checks that hash and tells you when
+sha256 `eba20f06…`): 1,950 items, 1,101 monsters and 26,694 mapped rooms. `init.sh` checks that hash and tells you when
 your file is a different build — not an error, just worth knowing, since the
 export will then describe your database rather than the one documented here.
 
@@ -79,6 +79,7 @@ Opening `index.html` directly from disk works too; the data is loaded as a plain
 5. **Classes & Races**, **Monsters**, **Shops** — the rest of the database, for
    looking things up rather than optimising: what a class may wear, what lives in
    a region and what it drops, and what every shop stocks at your Charm.
+6. **Maps** — all 26,694 rooms, drawn.
 
 ### The reference tabs
 
@@ -119,6 +120,53 @@ order you chose. Because the headings do the whole job, the *Sort* dropdowns
 those tabs used to carry are gone; the Shops tab keeps its one, because shops are
 cards rather than rows.
 
+### The maps
+
+There are no coordinates in the database. A room lists the room each of its ten
+exits leads to and nothing else, so the map has to be *derived*: `build_db.py`
+walks the graph and puts each room one cell from its neighbour in the direction
+the exit points, which is how you draw it in your head while playing.
+
+That cannot always work. A grid has four right angles and the world does not —
+walk north, east, south, west through a loop that does not close and two rooms
+want the same cell. The layout places what it can exactly, keeps looking outward
+when a cell is taken, and then relaxes: a room with unhappy exits is offered the
+cell each neighbour would put it in and takes whichever free one satisfies the
+most of them. **92.5% of exits end up exactly one cell away in their own
+direction**; the rest are drawn as stretched lines rather than dropped, so the
+connection is still true even where the geometry is not.
+
+| | |
+| --- | --- |
+| Rooms | 26,694 across 17 maps |
+| Areas | 881 — pieces with no walkable path between them, packed side by side onto one plane |
+| Exits drawn cleanly | 92.5% (map 2 is 99.9%, map 1's dense forest 73.6%) |
+
+**Up and down get no cell.** They lead somewhere that would sit on top of what
+is already drawn, so they are wedges on the room — ▲ above, ▼ below — that you
+click to follow. A doorway into another map is a mark on the room's edge and
+loads that map. Every exit is also listed in the room panel with whatever the
+database says about it: *(Door)*, *(Key: 1416 [or 101 picklocks])*, *(Trap, 40
+damage)*, *(Hidden/Searchable)*, *(Toll: 500)*, *(Level: 0 to 3)*.
+
+Hovering a room says what is in it, which is the question worth asking: the shop
+standing there, the monster fixed to it, everything that lairs in it, items left
+on the floor, whether it is dark enough to need a light, and **what you can type
+in it** — `pull lever`, `roll dice`, `go vortex`, `dive pool`. Those come from
+the room's command script, which is why the Portal Room lists seven things to
+try. Clicking a room opens the same thing as links: the monster goes to the
+Monsters tab, the shop to Shops, an item to its own entry.
+
+Five exits in the database lead to rooms that were never built — off a
+tournament room, a library, a gang house, the portal room, and map 17's *Module
+Test Room*. They are kept as the data has them, and shown as *no such room*
+rather than as a link into nothing.
+
+The map files are generated beside `gamedata.js` and loaded one at a time, the
+first time you open that map — 2 MB all told, which is not worth paying for up
+front. They are plain `<script>` files like the rest of the data, so opening
+`index.html` off the disk still works.
+
 ### Every reference is a link
 
 A weapon says which monster drops it. That monster is a row on another tab, so
@@ -133,6 +181,7 @@ search box, and flashing its row when it arrives. It works in every direction:
 | a monster's *Where* | everything else placed in that region |
 | a shop's stock, and its region tag | the item's entry, and what lives around the shop |
 | your worn and carried gear | each item's entry |
+| a shop's room, and an item's `Room 1/2231` trail | that room on the map |
 | the recommendation's *Currently* and *Recommended* | what you wear now, and what it would replace |
 
 Following a link should never land you on *nothing matches*, so the target tab's
@@ -467,7 +516,8 @@ assumption.
 
 ## Regenerating the item database
 
-`data/gamedata.js` is generated. To rebuild it from a different `.mdb`:
+`data/gamedata.js` and `data/maps/map-*.js` are generated. To rebuild them from a
+different `.mdb`:
 
 ```bash
 pip install access-parser
@@ -483,7 +533,7 @@ see [The game database](#the-game-database) above for where it comes from.
 node test/run.js
 ```
 
-355 assertions covering the formulas, the paste parser, the eligibility rules,
+391 assertions covering the formulas, the paste parser, the eligibility rules,
 the optimizer's invariants, the per-round swing schedule, the marginal pricing of
 crits, the per-swap impact maths, the spell scaling and cast chance, the drop
 tables and their locations, the reference tabs' indexes and item partition, the
@@ -513,6 +563,8 @@ long-standing community database viewer for this format:
 | Shop type / trainer level range | `modMMudFunc.GetShopTypeEnum`, `modMain` |
 | Monster drop tables and chances | `Monsters.DropItem-N` / `DropItem%-N`, `modMain` |
 | Monster attacks and their damage | `Monsters.AttType-N` / `AttMin-N` / `AttMax-N` / `AvgDmg` |
+| Room exits, and what guards them | `Rooms.N/S/E/W/NE/NW/SE/SW/U/D`, whose text carries the door, key, trap and toll |
+| What you can type in a room | `Rooms.CMD` into `TBInfo.Action` |
 | Spell damage / duration scaling | `modMMudDatabase.GetCurrentSpellMinMax`, `GetSpellMinDamage`, `GetSpellDuration` |
 | Spell effect rendering | `modMMudDatabase.PullSpellEQ` |
 | Cast chance and its cap | `modMMudFunc.GetSpellCastChance`, `STOCK_SPELL_HIT_CAP` |
