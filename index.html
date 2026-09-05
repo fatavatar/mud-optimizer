@@ -29,7 +29,12 @@
     <button class="tab is-active" data-tab="character">Character</button>
     <button class="tab" data-tab="optimize">Optimize</button>
     <button class="tab" data-tab="spells">Spells</button>
-    <button class="tab" data-tab="browse">Browse Items</button>
+    <button class="tab" data-tab="weapons">Weapons</button>
+    <button class="tab" data-tab="armour">Armour</button>
+    <button class="tab" data-tab="sundry">Sundry</button>
+    <button class="tab" data-tab="classes">Classes &amp; Races</button>
+    <button class="tab" data-tab="monsters">Monsters</button>
+    <button class="tab" data-tab="shops">Shops</button>
   </nav>
 </header>
 
@@ -220,17 +225,6 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
       <label class="ctl-label" for="sp-q">Search</label>
       <input type="search" id="sp-q" placeholder="name or short code">
     </div>
-    <div class="ctl">
-      <label class="ctl-label" for="sp-sort">Sort</label>
-      <select id="sp-sort">
-        <option value="level">Level required</option>
-        <option value="name">Name</option>
-        <option value="dmg">Damage</option>
-        <option value="dpm">Damage per mana</option>
-        <option value="dur">Duration</option>
-        <option value="mana">Mana cost</option>
-      </select>
-    </div>
     <label class="chk"><input type="checkbox" id="sp-known" checked> only what I can cast at this level</label>
     <button class="btn small" id="sp-fromchar">Use my character</button>
   </div>
@@ -239,22 +233,121 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
   <div id="sp-results"></div>
 </section>
 
-<!-- ------------------------------------------------ BROWSE -->
-<section class="panel" id="tab-browse">
+<!-- ------------------------------------------------ WEAPONS -->
+<section class="panel" id="tab-weapons">
   <div class="controls">
-    <input type="search" id="q" placeholder="Search item names&hellip;">
-    <select id="q-slot"><option value="">All slots</option></select>
-    <select id="q-sort">
-      <option value="name">Sort: name</option>
-      <option value="ac">Sort: AC</option>
-      <option value="dr">Sort: DR</option>
-      <option value="dmg">Sort: damage</option>
-      <option value="enc">Sort: encumbrance</option>
-      <option value="score">Sort: score for my build</option>
-    </select>
-    <label class="chk"><input type="checkbox" id="q-usable" checked> usable by me</label>
+    <div class="ctl grow">
+      <label class="ctl-label" for="w-q">Search</label>
+      <input type="search" id="w-q" placeholder="weapon name&hellip;">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="w-type">Weapon type</label>
+      <select id="w-type"><option value="">Any type</option></select>
+    </div>
+    <label class="chk"><input type="checkbox" id="w-usable" checked> usable by me</label>
+    <label class="chk"><input type="checkbox" id="w-ingame" checked> in-game only</label>
   </div>
-  <div id="browse"></div>
+  <p class="hint" id="w-note"></p>
+  <div id="weapons"></div>
+</section>
+
+<!-- ------------------------------------------------ ARMOUR -->
+<section class="panel" id="tab-armour">
+  <div class="controls">
+    <div class="ctl grow">
+      <label class="ctl-label" for="a-q">Search</label>
+      <input type="search" id="a-q" placeholder="armour name&hellip;">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="a-slot">Slot</label>
+      <select id="a-slot"><option value="">All slots</option></select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="a-type">Material</label>
+      <select id="a-type"><option value="">Any material</option></select>
+    </div>
+    <label class="chk"><input type="checkbox" id="a-usable" checked> usable by me</label>
+    <label class="chk"><input type="checkbox" id="a-ingame" checked> in-game only</label>
+  </div>
+  <p class="hint" id="a-note"></p>
+  <div id="armour"></div>
+</section>
+
+<!-- ------------------------------------------------ SUNDRY -->
+<section class="panel" id="tab-sundry">
+  <div class="controls">
+    <div class="ctl grow">
+      <label class="ctl-label" for="u-q">Search</label>
+      <input type="search" id="u-q" placeholder="item name&hellip;">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="u-type">Kind</label>
+      <select id="u-type"><option value="">Everything</option></select>
+    </div>
+    <label class="chk"><input type="checkbox" id="u-usable"> usable by me</label>
+    <label class="chk"><input type="checkbox" id="u-ingame" checked> in-game only</label>
+  </div>
+  <p class="hint" id="u-note"></p>
+  <div id="sundry"></div>
+</section>
+
+<!-- ------------------------------------------------ CLASSES &amp; RACES -->
+<section class="panel" id="tab-classes">
+  <h2>Classes</h2>
+  <p class="hint" id="cls-note"></p>
+  <div id="classlist"></div>
+
+  <h2>Races</h2>
+  <p class="hint">
+    Stat ranges are the minimum and maximum a character of that race can roll.
+    Innate bonuses are what the race grants on top, before any gear.
+    Click a column heading to sort by it, and again to reverse it.
+  </p>
+  <div id="racelist"></div>
+</section>
+
+<!-- ------------------------------------------------ MONSTERS -->
+<section class="panel" id="tab-monsters">
+  <div class="controls">
+    <div class="ctl grow">
+      <label class="ctl-label" for="m-q">Search</label>
+      <input type="search" id="m-q" placeholder="monster name, or an item it drops&hellip;">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="m-map">Region</label>
+      <select id="m-map"><option value="">Anywhere</option></select>
+    </div>
+    <label class="chk"><input type="checkbox" id="m-drops"> only ones that drop something</label>
+    <label class="chk"><input type="checkbox" id="m-ingame" checked> in-game only</label>
+  </div>
+  <p class="hint" id="m-note"></p>
+  <div id="monsters"></div>
+</section>
+
+<!-- ------------------------------------------------ SHOPS -->
+<section class="panel" id="tab-shops">
+  <div class="controls">
+    <div class="ctl grow">
+      <label class="ctl-label" for="sh-q">Search</label>
+      <input type="search" id="sh-q" placeholder="shop name, room, or something it stocks&hellip;">
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sh-tier">Region</label>
+      <select id="sh-tier"><option value="">Everywhere</option></select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label" for="sh-sort">Sort</label>
+      <select id="sh-sort">
+        <option value="tier">Region, then name</option>
+        <option value="name">Name</option>
+        <option value="stock">Items stocked</option>
+        <option value="markup">Markup</option>
+      </select>
+    </div>
+    <label class="chk"><input type="checkbox" id="sh-on"> only shops I left on</label>
+  </div>
+  <p class="hint" id="sh-note"></p>
+  <div id="shops"></div>
 </section>
 
 </main>

@@ -222,7 +222,7 @@ def build_item(r):
 
     stats, non_stacking, flags = {}, {}, {}
     min_level = max_level = None
-    class_ok, casts, negates_ability = [], [], []
+    class_ok, casts, learns, negates_ability = [], [], [], []
 
     for code, val in abils:
         key = ABILITY_TO_STAT.get(code)
@@ -239,6 +239,7 @@ def build_item(r):
         elif code in (82, 83): flags["cursed"] = True
         elif code == 100: flags["loyal"] = True
         elif code == 156: flags["quest"] = True
+        elif code == 42: learns.append(val)      # LearnSp: a scroll or tome
         elif code == 43: casts.append(val)
         elif code == 124: negates_ability.append(val)
         elif code in ALIGN_ONLY: flags["alignOnly"] = ALIGN_ONLY[code]
@@ -284,6 +285,7 @@ def build_item(r):
     if max_level: it["maxLvl"] = max_level
     if class_ok: it["classOk"] = class_ok
     if casts: it["casts"] = casts
+    if learns: it["learns"] = learns
     if flags: it["flags"] = flags
 
     cr = [int(num(r.get(f"ClassRest-{i}"))) for i in range(10)]
@@ -488,13 +490,35 @@ def main():
         it["drop"] = entries
         wanted_mons.update(e[0] for e in entries)
 
+    # Every monster is exported, not just the ones carrying loot: the Monsters
+    # tab is a bestiary, and "what else is in this room" is exactly the question
+    # you have when a drop is 2%. `wanted_mons` still marks the droppers.
     monsters = []
     for i in range(mrows):
         mnum = int(num(mtab["Number"][i]))
-        if mnum not in wanted_mons:
-            continue
         where = sorted(mon_maps.get(mnum, ()))
-        monsters.append({
+        # A monster swings with up to five different attacks. Only AttType 1 is
+        # a physical swing whose AttMin/AttMax are damage: on an AttType 2
+        # (a spell or special) AttMin is a flat 100 on all 507 such rows and
+        # plainly means something else, so folding those in would report a
+        # violet spore as hitting for "100-10". Their combined spread is the
+        # honest damage range; AvgDmg is the game's own summary, which already
+        # weights each attack by how often it is used. Two rows in the table
+        # have the pair the wrong way round, hence the min/max on each row.
+        lo, hi, atts, special = 0, 0, 0, 0
+        for k in range(5):
+            atype = int(num(mtab[f"AttType-{k}"][i]))
+            amin = int(num(mtab[f"AttMin-{k}"][i]))
+            amax = int(num(mtab[f"AttMax-{k}"][i]))
+            if atype == 2 and (amin or amax):
+                special += 1
+                continue
+            if atype != 1 or not amax:
+                continue
+            atts += 1
+            lo = min(amin, amax) if not lo else min(lo, amin, amax)
+            hi = max(hi, amin, amax)
+        m = {
             "n": mnum,
             "name": str(mtab["Name"][i] or "").strip(),
             "exp": int(num(mtab["EXP"][i])),
@@ -504,7 +528,19 @@ def main():
             "maps": where,
             "room": mon_room.get(mnum, ""),
             "inGame": bool(num(mtab["In Game"][i])),
-        })
+        }
+        if atts:
+            m["dmg"] = [lo, hi]
+            m["atts"] = atts
+        if special:
+            m["special"] = special
+        if num(mtab["AvgDmg"][i]):
+            m["avgDmg"] = int(num(mtab["AvgDmg"][i]))
+        if num(mtab["Undead"][i]):
+            m["undead"] = True
+        if num(mtab["MagicRes"][i]) == 0:
+            m.pop("mr")
+        monsters.append(m)
     monsters.sort(key=lambda m: m["n"])
 
     # ------------------------------------------------------------- spells
@@ -560,6 +596,16 @@ def main():
         for c in classes:
             if spell_usable_by(r, c["n"], c["magery"], c["mageryLvl"]):
                 castable[c["n"]].append(int(num(r["Number"])))
+
+    # Items point at spells the Spells tab never lists -- a scroll teaches a
+    # quest spell, a sword procs a monster one. Their numbers are meaningless on
+    # their own, so carry a name for every row in the table; it is only a name,
+    # and it keeps "casts spell #450" from reaching the page.
+    spell_names = {}
+    for r in spell_rows:
+        nm = str(r.get("Name") or "").strip()
+        if nm:
+            spell_names[int(num(r["Number"]))] = nm
 
     keep = {n for lst in castable.values() for n in lst}
     spells = []
@@ -622,6 +668,7 @@ def main():
         "maps": maps,
         "monsters": monsters,
         "spells": spells,
+        "spellNames": {str(k): v for k, v in sorted(spell_names.items())},
         "castable": {str(k): v for k, v in castable.items() if v},
         "mageryNames": MAGERY_NAMES,
         "spellTargets": SPELL_TARGETS,
@@ -644,7 +691,7 @@ def main():
     print(f"wrote {js}  ({os.path.getsize(js)/1024:.0f} KB)")
     print(f"  items={len(items)}  classes={len(classes)}  races={len(races)}  shops={len(shops)}")
     dropped = sum(1 for it in items if it.get("drop"))
-    print(f"  monsters={len(monsters)} that drop something; "
+    print(f"  monsters={len(monsters)}, {len(wanted_mons)} of them dropping something; "
           f"{dropped} items have a drop source, "
           f"{sum(1 for it in items if it.get('drop') and it['type'] == 1)} of them weapons")
     print(f"  spells={len(spells)} castable by a class "

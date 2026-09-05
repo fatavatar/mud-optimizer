@@ -29,6 +29,8 @@ vm.runInContext(
   'spellAlignOk,spellsFor,spellScalingText,spellByNum,'+
   'bestDrop,dropTooltip,sourceText,monByNum,monLocText,candidatePool,'+
   'swingSchedule,MAX_SWINGS,ENERGY_PER_ROUND,setRounds:n=>{fightRounds=n},'+
+  'passesRestrictions,isSundry,dropsByMonster,stockByShop,ctxFromChar,itemTags,spellName,'+
+  'sortRows,sourceOrder,sortState,'+
   'getRounds:()=>fightRounds,damageMargins,DAMAGE_MODELLED,weaponThroughput};', ctx);
 
 const X = ctx.__X;
@@ -838,6 +840,167 @@ eq(X.PRESETS['Melee damage'].crits, undefined,
    'the melee preset no longer carries a flat Crits weight');
 eq(X.PRESETS['Martial arts'].crits, 30,
    'but martial arts keeps one, because its damage is not modelled');
+
+/* -------------------------------------------------------- reference tabs */
+section('The reference tabs');
+
+// Every item lands on exactly one of the three item tabs. Weapons are type 1,
+// armour is type 0 with a wear location, and everything else -- including the
+// type-0 deeds and boxes you cannot put on -- is sundry.
+const weaponTab = D.items.filter(i => i.type === 1);
+const armourTab = D.items.filter(i => i.type === 0 && i.slot != null);
+const sundryTab = D.items.filter(X.isSundry);
+eq(weaponTab.length + armourTab.length + sundryTab.length, D.items.length,
+   'weapons, armour and sundry partition the item table');
+ok(!weaponTab.some(X.isSundry) && !armourTab.some(X.isSundry),
+   'and nothing is counted twice');
+ok(sundryTab.some(i => i.type === 0),
+   'the wearable-nothing armour rows (deeds, boxes) are sundry');
+ok(sundryTab.every(i => i.type !== 1), 'no weapon is sundry');
+
+// The generic restrictions are exactly the part of isUsable that does not
+// depend on wearing the thing, so gear that passes the full test must pass them.
+S.cls = D.classes.find(c => c.name === 'Mage').n;
+S.race = D.races.find(r => r.name === 'Human').n;
+S.level = 20; S.align = 'good';
+const gear = D.items.filter(i => (i.type === 0 || i.type === 1) && i.slot != null);
+const strictOpt = { requireInGame: true, allowLimited: false, allowCursed: false };
+ok(gear.every(i => !X.isUsable(i, strictOpt) || X.passesRestrictions(i, strictOpt)),
+   'anything isUsable accepts also passes the shared restrictions');
+ok(gear.some(i => X.passesRestrictions(i, strictOpt) && !X.isUsable(i, strictOpt)),
+   'and the type rules still reject armour a Mage cannot wear on top of them');
+
+// The drop table is exported on the item; the bestiary needs it the other way
+// round, so check the inversion against the source it was built from.
+const dropIdx = X.dropsByMonster();
+let idxRows = 0;
+for (const it of D.items) idxRows += (it.drop || []).length;
+eq([...dropIdx.values()].reduce((a, r) => a + r.length, 0), idxRows,
+   'the monster drop index holds every drop row the items carry');
+const hell = item('hellblade');
+const hellMon = X.bestDrop(hell).mon;
+ok(dropIdx.get(hellMon.n).some(d => d.it.n === hell.n),
+   'and the hellblade is listed under the fiend that drops it');
+ok(dropIdx.get(hellMon.n).every((d, i, a) => !i || a[i - 1].pct >= d.pct),
+   'each monster’s loot is listed best chance first');
+
+// Same turn-around for shops: Items.buy says which shops stock it.
+const stock = X.stockByShop();
+let buyRows = 0;
+for (const it of D.items) buyRows += (it.buy || []).length;
+eq([...stock.values()].reduce((a, r) => a + r.length, 0), buyRows,
+   'the shop stock index holds every shop-stock row');
+const soldItem = D.items.find(i => i.buy && i.buy.length);
+const soldShop = soldItem.buy[0][0];
+ok(stock.get(soldShop).some(r => r.it.n === soldItem.n),
+   'and an item sold at a shop appears in that shop’s stock');
+ok(X.stockByShop() === stock, 'the index is built once and reused');
+
+// The bestiary is the whole Monsters table now, not just the 421 that drop
+// something, so "what else lives here" has an answer.
+ok(D.monsters.length > 1000, 'every monster is exported, not just the droppers',
+   String(D.monsters.length));
+const droppers = new Set();
+for (const it of D.items) for (const [mn] of it.drop || []) droppers.add(mn);
+eq(droppers.size, 421, 'the droppers are still all present');
+ok([...droppers].every(n => X.monByNum.has(n)), 'and every drop names a monster we know');
+ok(D.monsters.some(m => m.dmg && m.dmg[1] > 0), 'monsters carry an attack damage spread');
+ok(D.monsters.every(m => !m.dmg || m.dmg[0] <= m.dmg[1]), 'and it is the right way round');
+// AttType 2 stores a flat 100 where a minimum would go on all 507 such rows, so
+// only physical swings (AttType 1) may reach the damage column -- otherwise a
+// violet spore reads as hitting for "100-10".
+ok(D.monsters.every(m => !m.dmg || m.dmg[0] < 100 || m.dmg[1] >= 100),
+   'no spell attack’s placeholder 100 leaked into a damage range');
+const sorceress = D.monsters.find(m => m.name === 'ice sorceress');
+eq(sorceress.dmg, undefined, 'a purely spell-slinging monster reports no swing range');
+eq(sorceress.special, 2, 'its special attacks are counted instead');
+ok(sorceress.avgDmg > 0, 'and the game’s own average damage stands in for them');
+
+// The reference tabs are quoted for the active character: the shared weapon
+// context has to describe them, innate crits included.
+S.cls = D.classes.find(c => c.name === 'Ninja').n;
+S.race = D.races.find(r => r.name === 'Dark-Elf').n;
+S.level = 30; S.base.str = 70; S.base.agi = 80; S.equipped = {};
+const wctx = X.ctxFromChar();
+eq(X.WCTX.level, 30, 'the context takes the character’s level');
+eq(X.WCTX.combat, wctx.cls.combat, 'and their class combat rating');
+eq(X.WCTX.str, 70, 'and their Strength');
+const innateCrit = X.sumAbil(wctx.cls.abils, 58) + X.sumAbil(wctx.race.abils, 58);
+eq(X.WCTX.crit, innateCrit, 'and the crits their class and race are born with');
+ok(innateCrit > 0, 'which for a Dark-Elf Ninja is not nothing', String(innateCrit));
+
+// Tags are how an item's restrictions reach the eye, so the awkward ones have
+// to survive the trip.
+const tagText = it => X.itemTags(it).map(t => t[1]).join(' · ');
+ok(tagText(item('hellblade')).includes('evil only'), 'an alignment-only item says so');
+const twoH = D.items.find(i => i.type === 1 && (i.wtype === 1 || i.wtype === 3));
+ok(tagText(twoH).includes('two-handed'), 'and a two-hander says that');
+
+// A scroll's whole point is the spell it teaches, and that spell is usually one
+// no class can learn from a trainer -- so names are carried for the whole spell
+// table, not just the 256 the Spells tab lists.
+eq(Object.keys(D.spellNames).length, 1378, 'every spell in the table has a name');
+const teachers = D.items.filter(i => i.learns);
+ok(teachers.length > 100, 'scrolls and tomes record what they teach', String(teachers.length));
+const unnamed = [];
+for (const it of D.items) {
+  for (const n of (it.learns || []).concat(it.casts || [])) {
+    if (X.spellName(n).startsWith('spell #')) unnamed.push(`${it.name} -> ${n}`);
+  }
+}
+// Two items -- an onion and a carrot -- proc spell numbers 1410 and 1411, which
+// are not rows in the Spells table at all. Nothing can name those, so the point
+// is that they are the only ones left and they degrade to the number.
+eq(unnamed.length, 2, 'every spell an item points at can be named, bar two dangling ones',
+   unnamed.join(', '));
+ok(tagText(item('ancient scroll')).includes('teaches soul rip'),
+   'so the ancient scroll says what it teaches, not a spell number');
+
+/* ------------------------------------------------------------ sorting */
+section('Sortable columns');
+
+const nameCol = { key: x => x.name };
+const numCol = { key: x => x.v };
+const sample = [{ name: 'beta', v: 2 }, { name: 'alpha', v: 10 }, { name: 'gamma', v: 2 }];
+
+eq(X.sortRows(sample, numCol, 1).map(x => x.v).join(','), '2,2,10', 'a number column sorts numerically');
+eq(X.sortRows(sample, numCol, -1).map(x => x.v).join(','), '10,2,2', 'and reverses');
+eq(X.sortRows(sample, nameCol, 1).map(x => x.name).join(','), 'alpha,beta,gamma',
+   'a string column sorts alphabetically');
+
+// The tie-break must not flip with the column, or the names beside a reversed
+// number column would come out backwards for no reason.
+const tie = (a, b) => a.name.localeCompare(b.name);
+eq(X.sortRows(sample, numCol, 1, tie).map(x => x.name).join(','), 'beta,gamma,alpha',
+   'ties break by the tie-breaker');
+eq(X.sortRows(sample, numCol, -1, tie).map(x => x.name).join(','), 'alpha,beta,gamma',
+   'and the tie-break keeps its own direction when the column reverses');
+
+// "No known source" is Infinity, which subtracting would turn into NaN and
+// scramble the whole column.
+const inf = [{ v: Infinity }, { v: 5 }, { v: Infinity }, { v: 1 }];
+eq(X.sortRows(inf, numCol, 1).map(x => x.v).join(','), '1,5,Infinity,Infinity',
+   'an unsourced row sorts last rather than scrambling the column');
+eq(X.sortRows(sample, {}, 1).length, 3, 'a column with no key leaves the order alone');
+
+// The "where to get it" order: buyable first and cheapest first, then drops by
+// chance, then things with no source at all.
+S.cls = D.classes.find(c => c.name === 'Warrior').n;
+S.race = D.races.find(r => r.name === 'Human').n;
+S.level = 30; S.align = '0'; S.base.cha = 50;
+X.setEnabled(D.shops.map(sh => sh.n));
+const sold = D.items.find(i => i.buy && i.buy.length && X.bestBuy(i));
+const dropped = D.items.find(i => !(i.buy || []).length && i.drop && i.drop.length);
+const neither = D.items.find(i => !(i.buy || []).length && !(i.drop || []).length);
+ok(X.sourceOrder(sold) < X.sourceOrder(dropped), 'what a shop sells sorts before what a monster drops');
+ok(X.sourceOrder(dropped) < X.sourceOrder(neither), 'and a drop sorts before no source at all');
+eq(X.sourceOrder(sold), X.bestBuy(sold).cost, 'a bought item sorts on what it costs you');
+const twoDrops = D.items.filter(i => !(i.buy || []).length && i.drop && i.drop.length >= 1);
+const likelier = twoDrops.reduce((a, b) => (X.bestDrop(b).pct > (a ? X.bestDrop(a).pct : 0) ? b : a), null);
+const rarer = twoDrops.reduce((a, b) => (X.bestDrop(b).pct < (a ? X.bestDrop(a).pct : 101) ? b : a), null);
+ok(X.sourceOrder(likelier) < X.sourceOrder(rarer),
+   'and among drops the likelier one comes first',
+   `${likelier.name} ${X.bestDrop(likelier).pct}% vs ${rarer.name} ${X.bestDrop(rarer).pct}%`);
 
 /* ------------------------------------------------------------------ report */
 console.log(`\n${pass} passed, ${fail} failed`);

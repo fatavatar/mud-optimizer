@@ -73,7 +73,66 @@ Opening `index.html` directly from disk works too; the data is loaded as a plain
    and press *Optimize*.
 3. **Spells** — every spell your class can learn, with its numbers worked out at
    your level.
-4. **Browse Items** — the whole item table, filtered to what your character can use.
+4. **Weapons**, **Armour**, **Sundry** — the item table, split three ways and
+   quoted for whoever is active: what a weapon actually swings for in your hands,
+   what a shop would charge you for a breastplate, what a scroll casts.
+5. **Classes & Races**, **Monsters**, **Shops** — the rest of the database, for
+   looking things up rather than optimising: what a class may wear, what lives in
+   a region and what it drops, and what every shop stocks at your Charm.
+
+### The reference tabs
+
+The optimizer only ever considers gear you can equip, which leaves most of the
+database unseen. Six tabs open the rest of it up. All of them describe the
+*active character* — almost nothing here is an absolute:
+
+| Tab | What it lists |
+| --- | --- |
+| Weapons | 383 weapons, with the energy per swing, the swings they land over the fight, and the damage per round **your** character gets out of them |
+| Armour | 494 wearable pieces, AC and DR unscaled, sorted by your own weights if you like |
+| Sundry | the other 1,073 rows — scrolls, keys, potions, light, containers, scenery, and the handful of "armour" you cannot actually wear |
+| Classes & Races | hits per level, combat rating, weapon and armour ceilings, magery and spell count; race stat bands and innate abilities |
+| Monsters | the whole bestiary, 1,101 of them, with what they hit for, where they live, and what they drop |
+| Shops | all 87 shops by region, with their full stock priced at your Charm |
+
+**Every column of every table sorts.** Click a heading to sort by it, click it
+again to reverse. The arrow marks the column in force, the first click picks the
+useful end (damage descending, names A to Z), and ties fall back to the name —
+which keeps its own direction, so the names beside a reversed damage column do
+not come out backwards. This is not limited to the new tabs: the Spells table
+and the Optimize tab's per-slot recommendation sort the same way, so you can ask
+the recommendation "which single swap is worth the most" by sorting *Impact*.
+
+A sort survives a filter change, so narrowing a search does not throw away the
+order you chose. Because the headings do the whole job, the *Sort* dropdowns
+those tabs used to carry are gone; the Shops tab keeps its one, because shops are
+cards rather than rows.
+
+Two columns sort on something other than what they print:
+
+- **Where to get it** orders by route rather than alphabetically: what a shop
+  sells first and cheapest first, then what you have to hunt for with the best
+  drop chance first, and last the things with no known source at all.
+- **Where** on the Monsters tab orders by the toughest region a monster is found
+  in, so the unlocated ones fall to the bottom rather than the top.
+
+Two things the tabs do that a flat table dump does not:
+
+- **The damage columns are yours.** A weapon's swings per round depend on your
+  class combat rating, level, Agility, Strength and how encumbered you are, so
+  the Weapons tab aims the same context the optimizer uses at your character.
+  Switch to another character in the roster and the numbers follow.
+- **Search reaches through.** Searching the Monsters tab matches loot as well as
+  names, so *hellblade* answers "what do I have to kill for this"; searching
+  Shops matches stock, so *plate* finds the shops that sell it.
+- **A scroll says what it teaches.** Items point at spells the Spells tab never
+  lists — a scroll teaches a quest spell, a sword procs a monster one — so a name
+  is carried for all 1,378 rows of the spell table rather than only the 256 a
+  class can learn, and the tag reads *teaches soul rip* instead of *spell #211*.
+
+An item you cannot use is struck through rather than hidden when you untick
+*usable by me* — with the box off you are deliberately looking at what you are
+missing.
 
 ### Swings, round by round
 
@@ -185,8 +244,8 @@ Two things about the location data:
 - A monster's whereabouts come from two different room columns. `Rooms.NPC` is
   the one monster fixed to a room; `Rooms.Lair` is a `(Max 3): 827,925,926` list
   of everything that can lair there. Using both locates 357 of the 421 dropping
-  monsters, against 336 from `NPC` alone. The rest say *location unknown* rather
-  than guessing.
+  monsters — and 889 of all 1,101 — against 336 from `NPC` alone. The rest say
+  *location unknown* rather than guessing.
 - Those lair lists are deliberately **not** fed into the map difficulty tiers
   that drive the shop filter. They name every wanderer passing through, which
   drowns the median: fold them in and map 12 falls from a median of 45,000 exp
@@ -384,10 +443,11 @@ see [The game database](#the-game-database) above for where it comes from.
 node test/run.js
 ```
 
-292 assertions covering the formulas, the paste parser, the eligibility rules,
+335 assertions covering the formulas, the paste parser, the eligibility rules,
 the optimizer's invariants, the per-round swing schedule, the marginal pricing of
 crits, the per-swap impact maths, the spell scaling and cast chance, the drop
-tables and their locations, and the character roster's save/restore round trip.
+tables and their locations, the reference tabs' indexes and item partition, the
+column sort rules, and the character roster's save/restore round trip.
 
 ## How the database was decoded
 
@@ -400,6 +460,7 @@ long-standing community database viewer for this format:
 | What | Where it came from |
 | --- | --- |
 | Ability code → name (187 codes) | `modMMudFunc.GetAbilityName` |
+| What a scroll teaches / an item casts | `Abil 42` (LearnSp), `Abil 43` (CastsSp) |
 | Ability code → character stat | `modMain.GetAbilityStatSlot` |
 | `Worn` value → equipment slot | `frmMain.InvenAddEquip` |
 | Class / level / alignment gating | `frmMain.ItemIsUsableByChar` |
@@ -410,6 +471,7 @@ long-standing community database viewer for this format:
 | Shop pricing (markup and Charm) | `modMMudDatabase.GetItemValue` |
 | Shop type / trainer level range | `modMMudFunc.GetShopTypeEnum`, `modMain` |
 | Monster drop tables and chances | `Monsters.DropItem-N` / `DropItem%-N`, `modMain` |
+| Monster attacks and their damage | `Monsters.AttType-N` / `AttMin-N` / `AttMax-N` / `AvgDmg` |
 | Spell damage / duration scaling | `modMMudDatabase.GetCurrentSpellMinMax`, `GetSpellMinDamage`, `GetSpellDuration` |
 | Spell effect rendering | `modMMudDatabase.PullSpellEQ` |
 | Cast chance and its cap | `modMMudFunc.GetSpellCastChance`, `STOCK_SPELL_HIT_CAP` |
@@ -443,6 +505,11 @@ Things worth knowing, all of which the tool handles:
   additionally use item 68 (dagger) and 100 (quarterstaff) — hardcoded in the
   game's own dll, not expressed in the data.
 - **A class with ability 51 (`AntiMagic`) cannot use any magical item.**
+- **Only `AttType` 1 is a swing.** A monster's five attack rows mix physical
+  attacks with spells and specials, and on an `AttType` 2 row `AttMin` is a flat
+  100 on all 507 of them — plainly not a damage minimum. Only type 1 rows feed
+  the damage range, so a violet spore reads *6 average* rather than *100–10*;
+  the 42 monsters that only ever cast fall back to the game's own `AvgDmg`.
 - **`StrReq` is not a restriction.** Nothing in the game's eligibility path checks
   it; being under a weapon's Strength requirement multiplies your energy cost per
   swing by `(3 × deficit + 200) / 200`, so you swing slower rather than being

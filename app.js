@@ -552,11 +552,13 @@ function sourceText(it) {
 
 /* ---------------------------------------------------------- eligibility */
 
-function isUsable(it, opt) {
-  const o = opt || {};
+/* The restrictions that apply to any item at all, worn or not: level band,
+ * alignment, race, class whitelist, and the AntiMagic rule. The armour- and
+ * weapon-type checks on top of these only mean anything for gear you equip, so
+ * they stay in isUsable; the reference tabs, which list keys and potions too,
+ * ask this one instead. */
+function passesRestrictions(it, o) {
   if (o.requireInGame && !it.inGame) return false;
-  if (it.type !== 0 && it.type !== 1) return false;
-  if (it.slot == null) return false;
 
   if (it.minLvl && it.minLvl > S.level) return false;
   if (it.maxLvl && it.maxLvl < S.level) return false;
@@ -577,12 +579,24 @@ function isUsable(it, opt) {
 
   // ClassOk (ability 59) whitelists the item and bypasses the type checks.
   const classOk = !!(it.classOk && it.classOk.includes(S.cls));
-
   if (!classOk && it.classRest && !it.classRest.includes(S.cls)) return false;
 
   // A class with AntiMagic (ability 51) cannot use magical items at all.
   if (c.abils.some(a => a[0] === 51) && f.magical) return false;
 
+  return true;
+}
+
+function isUsable(it, opt) {
+  const o = opt || {};
+  if (it.type !== 0 && it.type !== 1) return false;
+  if (it.slot == null) return false;
+  if (!passesRestrictions(it, o)) return false;
+
+  const c = clsByNum.get(S.cls);
+  if (!c) return true;
+
+  const classOk = !!(it.classOk && it.classOk.includes(S.cls));
   if (classOk) return true;
 
   if (it.type === 0) {
@@ -1280,12 +1294,28 @@ function initForm() {
     sc.append(new Option(`${c.name}${n ? '' : '  (no spells)'}`, c.n));
   }
 
-  const qs = $('#q-slot');
+  const as = $('#a-slot');
   const seen = new Set();
   for (const s of D.slots) {
     if (seen.has(s.pool)) continue;
     seen.add(s.pool);
-    qs.append(new Option(s.name.replace(/ \d$/, ''), s.pool));
+    as.append(new Option(s.name.replace(/ \d$/, ''), s.pool));
+  }
+  for (const k in D.weaponTypes) $('#w-type').append(new Option(D.weaponTypes[k], k));
+  for (const k in D.armourTypes) $('#a-type').append(new Option(D.armourTypes[k], k));
+  // The sundry tab is everything that is not a weapon or wearable armour, so the
+  // kind list skips weapons -- but keeps Armour, which is where the deeds and
+  // boxes with no wear location end up.
+  for (const k in D.itemTypes) {
+    if (+k === 1) continue;
+    $('#u-type').append(new Option(D.itemTypes[k], k));
+  }
+  for (const m of D.maps || []) {
+    $('#m-map').append(new Option(`map ${m.n} (${m.tier})`, m.n));
+  }
+  for (const t of TIER_ORDER) {
+    const n = D.shops.filter(sh => (mapByNum.get(shopMap(sh)) || {}).tier === t).length;
+    if (n) $('#sh-tier').append(new Option(`${t} (${n} shop${n === 1 ? '' : 's'})`, t));
   }
   $('#dbmeta').textContent =
     `${D.meta.source} · dat ${D.meta.datVersion} · nmr ${D.meta.nmrVersion} · ${D.meta.itemCount.toLocaleString()} items`;
@@ -1322,6 +1352,7 @@ function showActiveChar() {
   renderRoster();
   $('#parse-status').textContent = '';
   renderResults(null);
+  refreshActiveTab();            // the reference tabs describe whoever is active
 }
 function syncStateFromForm() {
   S.name = $('#f-name').value.trim();
@@ -1505,15 +1536,6 @@ function renderResults(res) {
   box.append(sum);
 
   // per-slot table
-  const wrap = el('div', 'tablewrap');
-  const tbl = el('table');
-  tbl.innerHTML = '<thead><tr><th>Slot</th><th>Currently</th><th>Recommended</th>' +
-    '<th title="Everything the whole set changes if you make this one swap, ' +
-    'including knock-on effects like encumbrance costing you dodge and crit chance.">' +
-    'Impact of this swap</th><th class="num">Enc</th><th>What it gives</th>' +
-    '<th>Where to get it</th></tr></thead>';
-  const tb = el('tbody');
-
   /* One impact figure per swap, worked out once and hung on the row that owns
    * the decision -- the weapon, when a two-hander is what empties the off-hand. */
   const same = (a, b) => (a ? a.n : 0) === (b ? b.n : 0);
@@ -1525,71 +1547,102 @@ function renderResults(res) {
     impacts.set(lead, swapImpact(res, g, innate, then));
   }
 
-  for (const s of D.slots) {
-    const nw = res.picks[s.i], od = S.equipped[s.i];
+  const rows = [];
+  for (const [order, sl] of D.slots.entries()) {
+    const nw = res.picks[sl.i], od = S.equipped[sl.i];
     if (!nw && !od) continue;
-    const tr = el('tr');
-    tr.append(el('td', 'slotname', s.name));
-    tr.append(el('td', 'cur', od ? od.name : '—'));
-
-    const tdNew = el('td');
     const changed = (nw && od) ? nw.n !== od.n : !!nw !== !!od;
-    const nameEl = el('div', 'pick' + (changed ? ' changed' : ''), nw ? nw.name : '— leave empty —');
-    if (nw) {
-      const tip = shopTooltip(nw);           // empty once every stocking shop is switched off
-      if (tip) { nameEl.title = tip; nameEl.classList.add('has-shop'); }
-    }
-    tdNew.append(nameEl);
-    if (nw) {
-      const tags = el('div', 'tags');
-      if (nw.flags && nw.flags.magical) tags.append(el('span', 'tag mag', 'magical'));
-      if (nw.limit) tags.append(el('span', 'tag lim', 'limited ' + nw.limit));
-      if (nw.flags && nw.flags.cursed) tags.append(el('span', 'tag curse', 'cursed'));
-      if (nw.strReq > (S.base.str || 0)) tags.append(el('span', 'tag lim', `needs Str ${nw.strReq}`));
-      if (isOwned(nw)) tags.append(el('span', 'tag own', 'you have it'));
-      else {
-        const ab = activeBuy(nw);
-        if (ab && ab.length) tags.append(el('span', 'tag buy', `in ${ab.length} shop${ab.length > 1 ? 's' : ''}`));
-        if (nw.drop && nw.drop.length) {
-          const t = el('span', 'tag drop', `drops from ${nw.drop.length} monster${nw.drop.length > 1 ? 's' : ''}`);
-          t.title = dropTooltip(nw);
-          tags.append(t);
-        }
-      }
-      if (tags.children.length) tdNew.append(tags);
-    }
-    tr.append(tdNew);
-    tr.append(impactCell(s.i, impacts, leadOf, changed));
-    tr.append(el('td', 'num', nw ? (nw.enc || 0).toLocaleString() : '—'));
-
-    const bits = [];
-    if (nw) {
-      if (nw.type === 1) {
-        const wp = weaponProfile(nw);
-        bits.push(`dmg ${nw.min}-${nw.max}`, D.weaponTypes[nw.wtype], `energy ${wp.energy}`);
-        bits.push(`crit ${wp.critPct}%` + (wp.qnd ? ` (incl. +${wp.qnd} quick & deadly)` : ''));
-        bits.push(`~${wp.perSwing.toFixed(1)}/swing`);
-        bits.push(`swings ${wp.schedule.join('-')} = ${wp.perRound.toFixed(1)}/round`);
-      }
-      for (const k in nw.stats) if (nw.stats[k]) bits.push(`${D.statLabels[k] || k} ${nw.stats[k] > 0 ? '+' : ''}${fmt(nw.stats[k])}`);
-      if (nw.ns) for (const k in nw.ns) bits.push(`${D.statLabels[k] || k} +${nw.ns[k]}*`);
-      if (nw.accy) bits.push(`to-hit ${nw.accy > 0 ? '+' : ''}${nw.accy}`);
-    }
-    tr.append(el('td', 'bonus', bits.join(' · ')));
-
-    const td$ = el('td', 'source');
-    if (!nw) td$.textContent = '—';
-    else if (isOwned(nw)) td$.append(el('span', 'imp-none', 'you have it'));
-    else {
-      const src = sourceText(nw);
-      const sp = el('span', 'src ' + src.kind, src.text);
-      if (src.title) { sp.title = src.title; sp.classList.add('has-shop'); }
-      td$.append(sp);
-    }
-    tr.append(td$);
-    tb.append(tr);
+    rows.push({ sl, nw, od, changed, order });
   }
-  tbl.append(tb); wrap.append(tbl); box.append(wrap);
+
+  const givesBits = nw => {
+    const bits = [];
+    if (!nw) return bits;
+    if (nw.type === 1) {
+      const wp = weaponProfile(nw);
+      bits.push(`dmg ${nw.min}-${nw.max}`, D.weaponTypes[nw.wtype], `energy ${wp.energy}`);
+      bits.push(`crit ${wp.critPct}%` + (wp.qnd ? ` (incl. +${wp.qnd} quick & deadly)` : ''));
+      bits.push(`~${wp.perSwing.toFixed(1)}/swing`);
+      bits.push(`swings ${wp.schedule.join('-')} = ${wp.perRound.toFixed(1)}/round`);
+    }
+    for (const k in nw.stats) if (nw.stats[k]) bits.push(`${D.statLabels[k] || k} ${nw.stats[k] > 0 ? '+' : ''}${fmt(nw.stats[k])}`);
+    if (nw.ns) for (const k in nw.ns) bits.push(`${D.statLabels[k] || k} +${nw.ns[k]}*`);
+    if (nw.accy) bits.push(`to-hit ${nw.accy > 0 ? '+' : ''}${nw.accy}`);
+    return bits;
+  };
+
+  // What the swap is worth in damage a round, which is what the column leads
+  // with -- so sorting it answers "which of these changes matters most".
+  const impactDps = r => {
+    const imp = impacts.get(leadOf.get(r.sl.i));
+    if (!imp || leadOf.get(r.sl.i) !== r.sl.i) return 0;
+    const dps = imp.rows.find(x => x.k === 'dps');
+    return dps ? dps.delta : 0;
+  };
+
+  tableInto(box, [
+    { h: 'Slot', key: r => r.order,
+      title: 'Sorts back into the order you wear it in.',
+      cell: r => el('td', 'slotname', r.sl.name) },
+    { h: 'Currently', key: r => (r.od ? r.od.name : ''),
+      cell: r => el('td', 'cur', r.od ? r.od.name : '—') },
+    { h: 'Recommended', key: r => (r.nw ? r.nw.name : ''), cell: r => {
+        const { nw } = r;
+        const td = el('td');
+        const nameEl = el('div', 'pick' + (r.changed ? ' changed' : ''), nw ? nw.name : '— leave empty —');
+        if (nw) {
+          const tip = shopTooltip(nw);         // empty once every stocking shop is switched off
+          if (tip) { nameEl.title = tip; nameEl.classList.add('has-shop'); }
+        }
+        td.append(nameEl);
+        if (nw) {
+          const tags = el('div', 'tags');
+          if (nw.flags && nw.flags.magical) tags.append(el('span', 'tag mag', 'magical'));
+          if (nw.limit) tags.append(el('span', 'tag lim', 'limited ' + nw.limit));
+          if (nw.flags && nw.flags.cursed) tags.append(el('span', 'tag curse', 'cursed'));
+          if (nw.strReq > (S.base.str || 0)) tags.append(el('span', 'tag lim', `needs Str ${nw.strReq}`));
+          if (isOwned(nw)) tags.append(el('span', 'tag own', 'you have it'));
+          else {
+            const ab = activeBuy(nw);
+            if (ab && ab.length) tags.append(el('span', 'tag buy', `in ${ab.length} shop${ab.length > 1 ? 's' : ''}`));
+            if (nw.drop && nw.drop.length) {
+              const t = el('span', 'tag drop', `drops from ${nw.drop.length} monster${nw.drop.length > 1 ? 's' : ''}`);
+              t.title = dropTooltip(nw);
+              tags.append(t);
+            }
+          }
+          if (tags.children.length) td.append(tags);
+        }
+        return td;
+      } },
+    { h: 'Impact of this swap', dir: -1, key: impactDps,
+      title: 'Everything the whole set changes if you make this one swap, including ' +
+             'knock-on effects like encumbrance costing you dodge and crit chance. ' +
+             'Sorts on the damage per round it moves.',
+      cell: r => impactCell(r.sl.i, impacts, leadOf, r.changed) },
+    { h: 'Enc', cls: 'num', dir: -1, key: r => (r.nw ? r.nw.enc || 0 : -1),
+      cell: r => el('td', 'num', r.nw ? (r.nw.enc || 0).toLocaleString() : '—') },
+    { h: 'What it gives', key: r => givesBits(r.nw).join(' · '),
+      cell: r => el('td', 'bonus', givesBits(r.nw).join(' · ')) },
+    { h: 'Where to get it', key: r => (!r.nw ? Infinity : isOwned(r.nw) ? -1 : sourceOrder(r.nw)),
+      title: 'What you already own first, then what you can buy, then what you have to hunt for.',
+      cell: r => {
+        const { nw } = r;
+        const td = el('td', 'source');
+        if (!nw) td.textContent = '—';
+        else if (isOwned(nw)) td.append(el('span', 'imp-none', 'you have it'));
+        else {
+          const src = sourceText(nw);
+          const sp = el('span', 'src ' + src.kind, src.text);
+          if (src.title) { sp.title = src.title; sp.classList.add('has-shop'); }
+          td.append(sp);
+        }
+        return td;
+      } },
+  ], rows, {
+    id: 'results', sort: 0, cap: rows.length, redraw: () => renderResults(res),
+    tie: (a, b) => a.order - b.order,
+  });
 
   const legend = el('div', 'hint legend');
   legend.textContent =
@@ -1599,7 +1652,8 @@ function renderResults(res) {
     'Impact is measured against the whole recommendation with only that slot put back ' +
     'the way you wear it now, so it answers "what does changing this one thing buy me". ' +
     'The column does not add up to the totals above: gear interacts, and weight taken off ' +
-    'one slot pays for itself somewhere else.';
+    'one slot pays for itself somewhere else.' +
+    ' Every column here sorts too — by impact, to see which single change is worth the most.';
   box.append(legend);
 
   const need = D.slots.map(s => res.picks[s.i]).filter(i => i && !isOwned(i));
@@ -1723,7 +1777,6 @@ function renderSpells() {
   const bonus = +$('#sp-bonus').value || 0;
   const align = $('#sp-align').value;
   const q = $('#sp-q').value.trim().toLowerCase();
-  const sort = $('#sp-sort').value;
   const knownOnly = $('#sp-known').checked;
 
   const c = clsByNum.get(clsNum);
@@ -1740,86 +1793,88 @@ function renderSpells() {
                                   (sp.short || '').toLowerCase().includes(q));
 
   const at = new Map(list.map(sp => [sp.n, spellAt(sp, level, sc, bonus)]));
-  const avg = sp => { const a = at.get(sp.n).dmg; return a ? (a.min + a.max) / 2 : 0; };
-  const cmp = {
-    level: (a, b) => a.req - b.req || a.name.localeCompare(b.name),
-    name: (a, b) => a.name.localeCompare(b.name),
-    dmg: (a, b) => avg(b) - avg(a) || a.req - b.req,
-    dpm: (a, b) => (avg(b) / (b.mana || 1)) - (avg(a) / (a.mana || 1)) || a.req - b.req,
-    dur: (a, b) => at.get(b.n).dur - at.get(a.n).dur || a.req - b.req,
-    mana: (a, b) => a.mana - b.mana || a.req - b.req,
-  }[sort];
-  list = list.slice().sort(cmp);
 
   note.textContent =
     `${c.name} draws on ${D.mageryNames[c.magery]} magery, level ${c.mageryLvl}. ` +
     `${list.length} spell${list.length === 1 ? '' : 's'} shown at caster level ${level}` +
     (sc ? `, Spellcasting ${sc}` : ', no Spellcasting set — cast chance assumes 100%') +
-    (bonus ? `, +${bonus}% spell damage` : '') + '.';
+    (bonus ? `, +${bonus}% spell damage` : '') + '.' + SORT_HINT;
 
   if (!list.length) { box.append(el('div', 'empty', 'Nothing matches.')); return; }
 
-  const wrap = el('div', 'tablewrap');
-  const tbl = el('table');
-  tbl.innerHTML = '<thead><tr><th>Spell</th><th class="num">Lvl</th><th class="num">Mana</th>' +
-    '<th>Damage / heal</th><th class="num">Duration</th><th class="num">Cast</th>' +
-    '<th>Effects</th><th>Target</th></tr></thead>';
-  const tb = el('tbody');
+  const range = r => (r.min === r.max ? fmt(r.min) : `${fmt(r.min)}–${fmt(r.max)}`);
+  const perMana = sp => {
+    const d = at.get(sp.n).dmg;
+    return d && sp.mana > 0 ? (d.min + d.max) / 2 * at.get(sp.n).casts / sp.mana : 0;
+  };
 
-  for (const sp of list) {
-    const a = at.get(sp.n);
-    const tr = el('tr');
-    if (level > 0 && level < sp.req) tr.classList.add('locked');
-
-    const tdName = el('td');
-    tdName.append(el('div', 'pick', sp.name));
-    const sub = el('div', 'tags');
-    if (sp.short) sub.append(el('span', 'tag', sp.short));
-    if (a.casts > 1) sub.append(el('span', 'tag mag', `${a.casts}x / round`));
-    if (a.capped) sub.append(el('span', 'tag lim', `capped at ${sp.cap}`));
-    if (a.bonused) sub.append(el('span', 'tag buy', `+${bonus}% applied`));
-    if (level > 0 && level < sp.req) sub.append(el('span', 'tag lim', `needs level ${sp.req}`));
-    tdName.append(sub);
-    tdName.title = spellScalingText(sp) + (sp.from ? ` · learned from ${sp.from}` : '');
-    tr.append(tdName);
-
-    tr.append(el('td', 'num', String(sp.req)));
-    tr.append(el('td', 'num', String(sp.mana)));
-
-    const tdD = el('td');
-    const range = r => (r.min === r.max ? fmt(r.min) : `${fmt(r.min)}–${fmt(r.max)}`);
-    if (a.dmg) {
-      const d = el('div', null, range(a.dmg) + ' dmg' + (a.casts > 1 ? ` ×${a.casts}` : ''));
-      tdD.append(d);
-      if (sp.mana > 0) {
-        const per = ((a.dmg.min + a.dmg.max) / 2 * a.casts / sp.mana);
-        tdD.append(el('div', 'k', `${per.toFixed(1)} per mana`));
-      }
-    }
-    if (a.heal) tdD.append(el('div', null, range(a.heal) + ' healed'));
-    if (!a.dmg && !a.heal) tdD.append(el('span', 'imp-none', '—'));
-    tr.append(tdD);
-
-    tr.append(el('td', 'num', a.dur > 0 ? `${a.dur} rd` : '—'));
-
-    const tdC = el('td', 'num', a.chance + '%');
-    tdC.title = sp.diff >= 200 ? 'Always succeeds.'
-      : `Spellcasting ${sc || 0} ${sp.diff < 0 ? '−' : '+'} ${Math.abs(sp.diff)} difficulty` +
-        `, capped at ${sp.magery === 5 ? 100 : STOCK_SPELL_HIT_CAP}%`;
-    if (a.chance < 90) tdC.classList.add('down');
-    tr.append(tdC);
-
-    tr.append(el('td', 'bonus', a.effects.join(' · ')));
-
-    const tdT = el('td', 'bonus');
-    tdT.textContent = D.spellTargets[sp.targets] || ('Target ' + sp.targets);
-    tdT.title = `${D.spellAttTypes[sp.att] || sp.att} attack type · ` +
-                (D.spellResists[sp.res] || '');
-    tr.append(tdT);
-
-    tb.append(tr);
-  }
-  tbl.append(tb); wrap.append(tbl); box.append(wrap);
+  tableInto(box, [
+    { h: 'Spell', key: sp => sp.name, cell: sp => {
+        const a = at.get(sp.n);
+        const td = el('td');
+        td.append(el('div', 'pick', sp.name));
+        const sub = el('div', 'tags');
+        if (sp.short) sub.append(el('span', 'tag', sp.short));
+        if (a.casts > 1) sub.append(el('span', 'tag mag', `${a.casts}x / round`));
+        if (a.capped) sub.append(el('span', 'tag lim', `capped at ${sp.cap}`));
+        if (a.bonused) sub.append(el('span', 'tag buy', `+${bonus}% applied`));
+        if (level > 0 && level < sp.req) sub.append(el('span', 'tag lim', `needs level ${sp.req}`));
+        td.append(sub);
+        td.title = spellScalingText(sp) + (sp.from ? ` · learned from ${sp.from}` : '');
+        return td;
+      } },
+    { h: 'Lvl', cls: 'num', key: sp => sp.req,
+      cell: sp => el('td', 'num', String(sp.req)) },
+    { h: 'Mana', cls: 'num', key: sp => sp.mana,
+      cell: sp => el('td', 'num', String(sp.mana)) },
+    { h: 'Damage / heal', cls: 'num', dir: -1,
+      key: sp => { const a = at.get(sp.n); return a.dmg ? (a.dmg.min + a.dmg.max) / 2 * a.casts
+                                                       : a.heal ? (a.heal.min + a.heal.max) / 2 : 0; },
+      title: 'Sorts on the middle of the range, times the casts a round buys.',
+      cell: sp => {
+        const a = at.get(sp.n);
+        const td = el('td');
+        if (a.dmg) td.append(el('div', null, range(a.dmg) + ' dmg' + (a.casts > 1 ? ` ×${a.casts}` : '')));
+        if (a.heal) td.append(el('div', null, range(a.heal) + ' healed'));
+        if (!a.dmg && !a.heal) td.append(el('span', 'imp-none', '—'));
+        return td;
+      } },
+    { h: 'Per mana', cls: 'num', dir: -1, key: perMana,
+      title: 'Average damage a round divided by what the spell costs to cast.',
+      cell: sp => {
+        const v = perMana(sp);
+        const td = el('td', 'num');
+        if (v) td.textContent = v.toFixed(1);
+        else td.append(el('span', 'imp-none', '—'));
+        return td;
+      } },
+    { h: 'Duration', cls: 'num', dir: -1, key: sp => at.get(sp.n).dur,
+      cell: sp => el('td', 'num', at.get(sp.n).dur > 0 ? `${at.get(sp.n).dur} rd` : '—') },
+    { h: 'Cast', cls: 'num', dir: -1, key: sp => at.get(sp.n).chance,
+      cell: sp => {
+        const a = at.get(sp.n);
+        const td = el('td', 'num', a.chance + '%');
+        td.title = sp.diff >= 200 ? 'Always succeeds.'
+          : `Spellcasting ${sc || 0} ${sp.diff < 0 ? '−' : '+'} ${Math.abs(sp.diff)} difficulty` +
+            `, capped at ${sp.magery === 5 ? 100 : STOCK_SPELL_HIT_CAP}%`;
+        if (a.chance < 90) td.classList.add('down');
+        return td;
+      } },
+    { h: 'Effects', key: sp => at.get(sp.n).effects.join(' · '),
+      cell: sp => el('td', 'bonus', at.get(sp.n).effects.join(' · ')) },
+    { h: 'Target', key: sp => D.spellTargets[sp.targets] || String(sp.targets),
+      cell: sp => {
+        const td = el('td', 'bonus');
+        td.textContent = D.spellTargets[sp.targets] || ('Target ' + sp.targets);
+        td.title = `${D.spellAttTypes[sp.att] || sp.att} attack type · ` +
+                   (D.spellResists[sp.res] || '');
+        return td;
+      } },
+  ], list, {
+    id: 'spells', sort: 1, redraw: renderSpells, cap: list.length,
+    tie: (a, b) => a.req - b.req || a.name.localeCompare(b.name),
+    rowClass: sp => (level > 0 && level < sp.req ? 'locked' : ''),
+  });
 
   const legend = el('div', 'hint legend');
   legend.textContent =
@@ -1830,66 +1885,776 @@ function renderSpells() {
   box.append(legend);
 }
 
-function renderBrowse() {
-  const q = $('#q').value.trim().toLowerCase();
-  const pool = $('#q-slot').value;
-  const sort = $('#q-sort').value;
-  const onlyUsable = $('#q-usable').checked;
-  const opt = { requireInGame: $('#opt-ingame').checked, allowLimited: true, allowCursed: true };
+/* ------------------------------------------------- browsing the database */
+/* Six reference tabs over the same tables the optimizer reads: weapons,
+ * armour, everything else, classes and races, the bestiary, and the shops.
+ * They are all quoted for the character that is active, because almost nothing
+ * here is an absolute -- what a weapon swings for, whether you may wear a
+ * breastplate and what a shop charges all depend on who is asking. */
 
-  let list = D.items.filter(i => (i.type === 0 || i.type === 1) && i.slot != null);
-  if (q) list = list.filter(i => i.name.toLowerCase().includes(q));
-  if (pool) list = list.filter(i => slotPool(i.slot) === pool);
-  if (onlyUsable && S.cls) list = list.filter(i => isUsable(i, opt));
+/* Aim the shared weapon context at the active character. The optimizer sets
+ * this up for itself at the top of every run, so borrowing it between runs
+ * costs nothing; what it buys is damage columns that describe the character
+ * rather than a generic level-1 body. */
+function ctxFromChar() {
+  const c = clsByNum.get(S.cls);
+  const race = D.races.find(r => r.n === S.race);
+  const { t, enc } = totalsOf(Object.values(S.equipped));
+  const str = (S.base.str || 0) + (t.str || 0);
+  const agi = (S.base.agi || 0) + (t.agi || 0);
+  const maxEnc = calcMaxEncum(str, t.encumPct || 0);
 
-  const w = S.weights;
-  const key = {
-    name: i => i.name, ac: i => -(i.stats.ac || 0), dr: i => -(i.stats.dr || 0),
-    dmg: i => -avgDmg(i), enc: i => i.enc, score: i => -scoreItem(i, w),
-  }[sort];
-  list = list.slice().sort((a, b) => { const x = key(a), y = key(b); return x < y ? -1 : x > y ? 1 : 0; });
+  WCTX.combat = c ? c.combat : 0;
+  WCTX.level = S.level || 1;
+  WCTX.str = str || 50;
+  WCTX.agi = agi || 50;
+  WCTX.encPct = maxEnc ? Math.min(100, Math.trunc((enc / maxEnc) * 100)) : 50;
+  // Crits and +Max Damage from class, race and what is worn -- the same three
+  // sources the optimizer sums, so a weapon reads the same on both tabs.
+  WCTX.crit = (c ? sumAbil(c.abils, 58) : 0) + (race ? sumAbil(race.abils, 58) : 0) + (t.crits || 0);
+  WCTX.plusMaxDmg = (c ? sumAbil(c.abils, 4) : 0) + (race ? sumAbil(race.abils, 4) : 0) + (t.maxdmg || 0);
+  WCTX.refWeapon = S.equipped[16] || null;
+  WCTX.margins = damageMargins();
 
-  const box = $('#browse'); box.innerHTML = '';
-  if (!list.length) { box.append(el('div', 'empty', 'No items match.')); return; }
+  return { cls: c, race, str, agi, enc, maxEnc, known: !!c };
+}
+
+/* How the character is described in a tab's note line. */
+function charNote(ctx) {
+  if (!ctx.known) {
+    return 'No class set, so these numbers assume a level 1 body with 50 Strength and ' +
+           '50 Agility. Fill in the Character tab and they become yours.';
+  }
+  return `Quoted for ${S.name || 'your character'} — level ${WCTX.level} ` +
+         `${ctx.cls.name}, Str ${WCTX.str}, Agi ${WCTX.agi}, ` +
+         `${WCTX.encPct}% encumbered in what you are wearing.`;
+}
+
+/* Items point at spells the Spells tab never lists -- a scroll teaches a quest
+ * spell, a sword procs a monster one -- so names are carried for the whole
+ * table, not just the 256 a class can learn. */
+function spellName(n) {
+  const sp = spellByNum.get(n);
+  return (sp && sp.name) || (D.spellNames || {})[n] || ('spell #' + n);
+}
+
+const listOfClasses = ns => (ns || []).map(n => (clsByNum.get(n) || {}).name || ('class ' + n)).join(', ');
+const listOfRaces = ns => (ns || []).map(n => (D.races.find(r => r.n === n) || {}).name || ('race ' + n)).join(', ');
+
+/* Everything that is not a weapon and not a wearable piece of armour: keys,
+ * potions, scrolls, containers, light sources, quest junk. The handful of
+ * type-0 rows with no wear location -- deeds, boxes, a bulletin board -- belong
+ * here rather than on the armour tab, because you cannot put them on. */
+const isSundry = it => !(it.type === 1 || (it.type === 0 && it.slot != null));
+
+/* Everything that qualifies an item, as short tags under its name. */
+function itemTags(it) {
+  const out = [];
+  if (it.type === 1 && (it.wtype === 1 || it.wtype === 3)) out.push(['', 'two-handed']);
+  if (it.minLvl) out.push(['lim', `level ${it.minLvl}+`]);
+  if (it.maxLvl) out.push(['lim', `to level ${it.maxLvl}`]);
+  if (it.limit) out.push(['lim', `limited ${it.limit}`]);
+  const f = it.flags || {};
+  if (f.cursed) out.push(['curse', 'cursed']);
+  if (f.loyal) out.push(['curse', 'loyal']);
+  if (f.magical) out.push(['mag', 'magical']);
+  if (f.alignOnly) out.push(['lim', f.alignOnly + ' only']);
+  if (f.alignNot) out.push(['lim', 'not ' + [].concat(f.alignNot).join(' or ')]);
+  if (it.classRest) out.push(['own', listOfClasses(it.classRest) + ' only']);
+  if (it.classOk) out.push(['own', 'also ' + listOfClasses(it.classOk)]);
+  if (it.raceRest) out.push(['own', listOfRaces(it.raceRest) + ' only']);
+  for (const n of it.casts || []) out.push(['mag', 'casts ' + spellName(n)]);
+  for (const n of it.learns || []) out.push(['mag', 'teaches ' + spellName(n)]);
+  if (!it.inGame) out.push(['', 'not in game']);
+  return out;
+}
+
+function itemNameCell(it) {
+  const td = el('td');
+  td.append(el('div', 'pick', it.name));
+  const tags = itemTags(it);
+  if (tags.length) {
+    const sub = el('div', 'tags');
+    for (const [k, text] of tags) sub.append(el('span', 'tag' + (k ? ' ' + k : ''), text));
+    td.append(sub);
+  }
+  // Sundry is not gear, so the armour- and weapon-type rules do not apply to it;
+  // only the restrictions that gate any item at all decide whether it is struck
+  // through. Nothing is hidden here -- with "usable by me" off you are
+  // deliberately looking at what you cannot have.
+  const opt = { allowLimited: true, allowCursed: true };
+  const ok = isSundry(it) ? passesRestrictions(it, opt) : isUsable(it, opt);
+  if (S.cls && !ok) {
+    td.classList.add('locked');
+    td.title = 'Your class, race, level or alignment rules this one out.';
+  }
+  return td;
+}
+
+/* Where an item comes from, leading with the shop price when there is one --
+ * that is the route you control -- and naming the best drop otherwise. An item
+ * that is both sold and dropped keeps both tooltips. */
+function sourceCell(it) {
+  const td = el('td', 'bonus');
+  const s = sourceText(it);
+  let text = s.text;
+  const tips = [];
+  if ((activeBuy(it) || []).length) tips.push(shopTooltip(it));
+  if (it.drop && it.drop.length) tips.push(dropTooltip(it));
+  if (s.kind === 'none' && it.from) {
+    // Not sold and not dropped, but the export still knows where it turned up:
+    // a room, a text block, or inside another item.
+    text = it.from.length > 44 ? it.from.slice(0, 44) + '…' : it.from;
+    tips.push(it.from);
+  }
+  const span = el('span', 'src ' + s.kind, text);
+  const tip = tips.filter(Boolean).join('\n\n');
+  if (tip) { span.title = tip; span.classList.add('has-shop'); }
+  td.append(span);
+  return td;
+}
+
+/* The Sort dropdowns these tabs used to carry are gone -- the headings do that
+ * job now -- so each note says so once. */
+const SORT_HINT = ' Click a column heading to sort by it, and again to reverse it.';
+
+/* The tie-break every table falls back on. */
+const tieByName = (a, b) => (a.name || '').localeCompare(b.name || '');
+
+/* One number that puts "where to get it" in a useful order: what you can buy
+ * first and cheapest first, then what you have to hunt for with the best chance
+ * first, and last the things with no known source at all. */
+function sourceOrder(it) {
+  const b = bestBuy(it);
+  if (b) return b.cost;
+  const d = bestDrop(it);
+  if (d) return 1e12 + (100 - d.pct) * 1e6 + (d.mon.exp || 0);
+  return 1e15;
+}
+
+/* An item's stat line as words, minus whatever the table already has a column
+ * for. */
+function effectBits(it, skip) {
+  const bits = [];
+  for (const k in it.stats) {
+    if (!it.stats[k] || (skip && skip.has(k))) continue;
+    bits.push(`${D.statLabels[k] || k} ${it.stats[k] > 0 ? '+' : ''}${fmt(it.stats[k])}`);
+  }
+  if (it.accy) bits.push(`Accuracy ${it.accy > 0 ? '+' : ''}${it.accy}`);
+  // What a scroll teaches or a wand casts is a tag under the item's name, not a
+  // stat, so it is deliberately not repeated here.
+  return bits;
+}
+
+/* Which column each table is sorted by, and which way. Kept here rather than in
+ * the DOM because every table is thrown away and rebuilt on each redraw, and
+ * kept out of localStorage because a sort is a glance, not a setting. */
+const sortState = {};
+
+/* Order a table's rows by one column. A column whose key returns a string sorts
+ * alphabetically and everything else numerically; comparing rather than
+ * subtracting keeps an Infinity (the "no known source" end of a sort) sane. The
+ * tie-break is deliberately not flipped along with the column, so names stay
+ * A to Z whichever way you sort the damage beside them. */
+function sortRows(list, col, dir, tie) {
+  if (!col || !col.key) return list;
+  const k = col.key;
+  return list.slice().sort((a, b) => {
+    const x = k(a), y = k(b);
+    const c = (typeof x === 'string' || typeof y === 'string')
+      ? String(x).localeCompare(String(y))
+      : (x === y ? 0 : x < y ? -1 : 1);
+    return c * dir || (tie ? tie(a, b) : 0);
+  });
+}
+
+/* Every table on the page is built through here, and every column that has an
+ * order worth having is clickable.
+ *
+ * `cols` describes the columns: `h` is the heading, `cell(row)` builds the td,
+ * and `key(row)` is what the column sorts on -- a number sorts numerically, a
+ * string alphabetically, and a column with no `key` is simply not clickable.
+ * `dir` is the direction the first click uses, because the useful end differs
+ * per column: -1 for damage (biggest first), +1 for a name.
+ *
+ * `opt.id` names the table's sort state, `opt.sort` is the column it starts on,
+ * `opt.redraw` rebuilds the tab a click has resorted, `opt.tie` breaks ties, and
+ * `opt.cap` stops a 1,000-row filter from locking the browser up. */
+function tableInto(box, cols, list, opt) {
+  const o = opt || {};
+  const limit = o.cap || 400;
+  const st = sortState[o.id] || (sortState[o.id] = null);
+  const start = st || { col: o.sort == null ? -1 : o.sort, dir: 0 };
+  if (start.dir === 0) start.dir = (cols[start.col] || {}).dir || 1;
+  sortState[o.id] = start;
+
+  const rows = sortRows(list, cols[start.col], start.dir, o.tie);
 
   const wrap = el('div', 'tablewrap');
   const tbl = el('table');
-  tbl.innerHTML = '<thead><tr><th>Item</th><th>Slot</th><th class="num">AC</th><th class="num">DR</th>' +
-    '<th class="num">Dmg</th><th class="num">Enc</th><th class="num">Score</th><th>Notes</th></tr></thead>';
-  const tb = el('tbody');
-  for (const i of list.slice(0, 500)) {
-    const tr = el('tr');
-    tr.append(el('td', null, i.name));
-    tr.append(el('td', 'slotname', SLOT.get(i.slot).name.replace(/ \d$/, '')));
-    tr.append(el('td', 'num', fmt(i.stats.ac || 0)));
-    tr.append(el('td', 'num', fmt(i.stats.dr || 0)));
-    tr.append(el('td', 'num', i.type === 1 ? `${i.min}-${i.max}` : '—'));
-    tr.append(el('td', 'num', (i.enc || 0).toLocaleString()));
-    tr.append(el('td', 'num', fmt(scoreItem(i, w))));
-    const notes = [];
-    if (i.limit) notes.push('limited ' + i.limit);
-    if (i.minLvl) notes.push('lvl ' + i.minLvl + '+');
-    if (i.flags && i.flags.alignOnly) notes.push(i.flags.alignOnly + ' only');
-    const bb = bestBuy(i);
-    if (bb) {
-      const k = activeBuy(i).length;
-      notes.push(`${k} shop${k > 1 ? 's' : ''}, from ${priceText(bb.cost)}`);
+  const thead = el('thead');
+  const htr = el('tr');
+  cols.forEach((c, i) => {
+    const th = el('th', c.cls || null, c.h);
+    const tips = [];
+    if (c.title) tips.push(c.title);
+    if (c.key) {
+      const isActive = i === start.col;
+      th.classList.add('sortable');
+      th.tabIndex = 0;
+      th.setAttribute('role', 'button');
+      th.setAttribute('aria-sort', isActive ? (start.dir < 0 ? 'descending' : 'ascending') : 'none');
+      if (isActive) {
+        th.classList.add('sorted');
+        th.append(el('span', 'arrow', start.dir < 0 ? '▼' : '▲'));
+      }
+      tips.push(isActive ? 'Click to reverse the order.' : 'Click to sort by this column.');
+      const go = () => {
+        if (i === start.col) start.dir = -start.dir;
+        else { start.col = i; start.dir = c.dir || 1; }
+        o.redraw();
+      };
+      th.addEventListener('click', go);
+      th.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+      });
     }
-    const dd = bestDrop(i);
-    if (dd) notes.push(`drops: ${dd.mon.name || 'monster #' + dd.mon.n} ${dd.pct}%`);
-    if (!bb && !dd && i.from) notes.push(i.from.slice(0, 48));
-    const tdN = el('td', 'bonus', notes.join(' · '));
-    // Both tooltips when an item is both bought and dropped -- either route counts.
-    const tip = [bb ? shopTooltip(i) : '', dd ? dropTooltip(i) : ''].filter(Boolean).join('\n\n');
-    if (tip) { tdN.title = tip; tdN.classList.add('has-shop'); }
-    tr.append(tdN);
+    if (tips.length) th.title = tips.join(' ');
+    htr.append(th);
+  });
+  thead.append(htr); tbl.append(thead);
+
+  const tb = el('tbody');
+  for (const x of rows.slice(0, limit)) {
+    const tr = el('tr');
+    if (o.rowClass) { const rc = o.rowClass(x); if (rc) tr.className = rc; }
+    for (const c of cols) tr.append(c.cell(x));
     tb.append(tr);
   }
   tbl.append(tb); wrap.append(tbl); box.append(wrap);
-  if (list.length > 500) box.append(el('div', 'empty', `showing first 500 of ${list.length}`));
+  if (rows.length > limit) {
+    box.append(el('div', 'empty',
+      `showing the first ${limit} of ${rows.length} — sort or filter to bring others into view`));
+  }
+}
+
+/* ------------------------------------------------------------- weapons */
+
+function renderWeapons() {
+  const ctx = ctxFromChar();
+  fightRounds = +($('#rounds') || {}).value || FIGHT_ROUNDS_DEFAULT;
+
+  const q = $('#w-q').value.trim().toLowerCase();
+  const wt = $('#w-type').value;
+  const inGame = $('#w-ingame').checked;
+  const opt = { requireInGame: inGame, allowLimited: true, allowCursed: true };
+
+  let list = D.items.filter(i => i.type === 1);
+  if (inGame) list = list.filter(i => i.inGame);
+  if (q) list = list.filter(i => i.name.toLowerCase().includes(q));
+  if (wt !== '') list = list.filter(i => String(i.wtype) === wt);
+  if ($('#w-usable').checked && S.cls) list = list.filter(i => isUsable(i, opt));
+
+  const prof = new Map(list.map(i => [i.n, weaponProfile(i)]));
+  const p = it => prof.get(it.n);
+
+  $('#w-note').textContent = charNote(ctx) +
+    ` Swings and damage are what the weapon actually lands over ${fightRounds} rounds, ` +
+    'carrying leftover energy from one round into the next — not a continuous rate. ' +
+    `${list.length} weapon${list.length === 1 ? '' : 's'} shown.` + SORT_HINT;
+
+  const box = $('#weapons'); box.innerHTML = '';
+  if (!list.length) { box.append(el('div', 'empty', 'No weapons match.')); return; }
+
+  tableInto(box, [
+    { h: 'Weapon', key: it => it.name, cell: itemNameCell },
+    { h: 'Type', key: it => D.weaponTypes[it.wtype] || '',
+      cell: it => el('td', 'slotname', D.weaponTypes[it.wtype] || '—') },
+    { h: 'Damage', cls: 'num', dir: -1, key: avgDmg,
+      title: 'Sorts on the middle of the range.',
+      cell: it => {
+        const td = el('td', 'num', `${it.min}–${it.max}`);
+        td.title = `average ${fmt(avgDmg(it))} on a normal hit, ` +
+                   `${fmt(p(it).crit)} on a crit · ${fmt(p(it).critPct)}% crit chance ` +
+                   `(${WCTX.crit} from class, race and gear, +${p(it).qnd} quick and deadly)`;
+        return td;
+      } },
+    { h: 'Speed', cls: 'num', key: it => it.speed || 0,
+      title: 'Lower is faster: it is the energy the weapon costs before your own numbers are applied.',
+      cell: it => el('td', 'num', String(it.speed || 0)) },
+    { h: 'Energy', cls: 'num', key: it => p(it).energy,
+      title: 'What one swing costs you, out of the 1,000 energy a round hands you.',
+      cell: it => el('td', 'num', String(Math.round(p(it).energy))) },
+    { h: 'Swings', cls: 'num', dir: -1, key: it => p(it).swings,
+      cell: it => {
+        const td = el('td', 'num', String(p(it).swings));
+        td.title = `round by round: ${p(it).schedule.join(', ')}`;
+        return td;
+      } },
+    { h: 'Dmg/round', cls: 'num', dir: -1, key: it => p(it).perRound,
+      cell: it => el('td', 'num', fmt(p(it).perRound)) },
+    { h: 'Enc', cls: 'num', key: it => it.enc || 0,
+      cell: it => el('td', 'num', (it.enc || 0).toLocaleString()) },
+    { h: 'Str', cls: 'num', key: it => it.strReq || 0,
+      cell: it => {
+        const td = el('td', 'num', it.strReq ? String(it.strReq) : '—');
+        if ((it.strReq || 0) > WCTX.str) {
+          td.classList.add('down');
+          td.title = `${it.strReq - WCTX.str} short. Being under a weapon's Strength ` +
+                     'requirement does not stop you using it — it multiplies your energy ' +
+                     'per swing, so you swing slower. That is already in the numbers here.';
+        }
+        return td;
+      } },
+    { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
+      title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
+  ], list, { id: 'weapons', sort: 6, redraw: renderWeapons, tie: tieByName });
+}
+
+/* -------------------------------------------------------------- armour */
+
+function renderArmour() {
+  const ctx = ctxFromChar();
+  const q = $('#a-q').value.trim().toLowerCase();
+  const pool = $('#a-slot').value;
+  const at = $('#a-type').value;
+  const inGame = $('#a-ingame').checked;
+  const opt = { requireInGame: inGame, allowLimited: true, allowCursed: true };
+
+  let list = D.items.filter(i => i.type === 0 && i.slot != null);
+  if (inGame) list = list.filter(i => i.inGame);
+  if (q) list = list.filter(i => i.name.toLowerCase().includes(q));
+  if (pool) list = list.filter(i => slotPool(i.slot) === pool);
+  if (at !== '') list = list.filter(i => String(i.atype || 0) === at);
+  if ($('#a-usable').checked && S.cls) list = list.filter(i => isUsable(i, opt));
+
+  const w = S.weights;
+  const c = ctx.cls;
+  $('#a-note').textContent =
+    (c ? `${c.name} can wear up to ${D.armourTypes[c.armourType]}. ` : '') +
+    'AC and DR are the real values — both columns are stored ×10 in the database and ' +
+    'divided on export. Score is this item against your own weights from the Optimize tab. ' +
+    `${list.length} piece${list.length === 1 ? '' : 's'} shown.` + SORT_HINT;
+
+  const box = $('#armour'); box.innerHTML = '';
+  if (!list.length) { box.append(el('div', 'empty', 'No armour matches.')); return; }
+
+  const skip = new Set(['ac', 'dr']);
+  tableInto(box, [
+    { h: 'Armour', key: it => it.name, cell: itemNameCell },
+    { h: 'Slot', key: it => SLOT.get(it.slot).name,
+      cell: it => el('td', 'slotname', SLOT.get(it.slot).name.replace(/ \d$/, '')) },
+    { h: 'Material', key: it => it.atype || 0,
+      title: 'Sorts by weight of material, cloth to full plate.',
+      cell: it => {
+        const td = el('td', 'slotname', D.armourTypes[it.atype || 0] || '—');
+        if (c && c.armourType < (it.atype || 0)) {
+          td.classList.add('down');
+          td.title = `Too heavy a material for a ${c.name}, who stops at ${D.armourTypes[c.armourType]}.`;
+        }
+        return td;
+      } },
+    { h: 'AC', cls: 'num', dir: -1, key: it => it.stats.ac || 0,
+      cell: it => el('td', 'num', fmt(it.stats.ac || 0)) },
+    { h: 'DR', cls: 'num', dir: -1, key: it => it.stats.dr || 0,
+      cell: it => el('td', 'num', fmt(it.stats.dr || 0)) },
+    { h: 'Enc', cls: 'num', key: it => it.enc || 0,
+      cell: it => el('td', 'num', (it.enc || 0).toLocaleString()) },
+    { h: 'Score', cls: 'num', dir: -1, key: it => scoreItem(it, w),
+      title: 'This piece against your own weights from the Optimize tab.',
+      cell: it => el('td', 'num', fmt(scoreItem(it, w))) },
+    { h: 'Also gives', key: it => effectBits(it, skip).join(' · '),
+      cell: it => el('td', 'bonus', effectBits(it, skip).join(' · ')) },
+    { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
+      title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
+  ], list, { id: 'armour', sort: 3, redraw: renderArmour, tie: tieByName });
+}
+
+/* -------------------------------------------------------------- sundry */
+
+const sundryValue = it => (it.price || 0) * (D.currencyInCopper[it.cur] || 1);
+
+function renderSundry() {
+  const q = $('#u-q').value.trim().toLowerCase();
+  const kind = $('#u-type').value;
+  const inGame = $('#u-ingame').checked;
+  const opt = { requireInGame: inGame, allowLimited: true, allowCursed: true };
+
+  let list = D.items.filter(isSundry);
+  if (inGame) list = list.filter(i => i.inGame);
+  if (q) list = list.filter(i => i.name.toLowerCase().includes(q));
+  if (kind !== '') list = list.filter(i => String(i.type) === kind);
+  if ($('#u-usable').checked && S.cls) list = list.filter(i => passesRestrictions(i, opt));
+
+  $('#u-note').textContent =
+    'Everything that is neither a weapon nor a wearable piece of armour. None of it is ' +
+    'scored — the optimizer only picks gear you can equip — so this tab is here to look ' +
+    'things up: what a scroll casts, what a key opens, what a shop wants for it. ' +
+    `${list.length} item${list.length === 1 ? '' : 's'} shown.` + SORT_HINT;
+
+  const box = $('#sundry'); box.innerHTML = '';
+  if (!list.length) { box.append(el('div', 'empty', 'Nothing matches.')); return; }
+
+  tableInto(box, [
+    { h: 'Item', key: it => it.name, cell: itemNameCell },
+    { h: 'Kind', key: it => D.itemTypes[it.type] || '',
+      cell: it => el('td', 'slotname', D.itemTypes[it.type] || '—') },
+    { h: 'Enc', cls: 'num', key: it => it.enc || 0,
+      cell: it => el('td', 'num', (it.enc || 0).toLocaleString()) },
+    { h: 'Base value', cls: 'num', dir: -1, key: sundryValue,
+      title: 'The database value, before any shop markup or your Charm.',
+      cell: it => {
+        const v = sundryValue(it);
+        const td = el('td', 'num', v ? copperToText(v) : 'free');
+        td.title = 'The database value, before any shop markup or your Charm.';
+        return td;
+      } },
+    { h: 'Effects', key: it => effectBits(it).join(' · '),
+      cell: it => el('td', 'bonus', effectBits(it).join(' · ')) },
+    { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
+      title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
+  ], list, { id: 'sundry', sort: 0, redraw: renderSundry, tie: tieByName, cap: 500 });
+}
+
+/* ---------------------------------------------------- classes and races */
+
+/* Innate class or race abilities, in words. These are the same Abil/AbilVal
+ * pairs items carry, so the value is only worth printing when it is not zero --
+ * a great many of them are flags rather than amounts. */
+function abilBits(abils) {
+  return (abils || []).map(([code, val]) => {
+    const name = D.abilityNames[code] || ('ability ' + code);
+    return val ? `${name} ${val > 0 ? '+' : ''}${val}` : name;
+  });
+}
+
+const RACE_STATS = [['int', 'Int'], ['wil', 'Wil'], ['str', 'Str'],
+                    ['hea', 'Hea'], ['agi', 'Agi'], ['cha', 'Cha']];
+
+function renderClassRace() {
+  $('#cls-note').textContent =
+    'Hit points per level are rolled between the minimum and maximum. Combat rating drives ' +
+    'how much energy a swing costs, so it is why the same weapon is faster in some hands ' +
+    'than others. Weapons and armour are the ceilings the eligibility rules enforce.' + SORT_HINT;
+
+  const spellCount = c => (D.castable[c.n] || []).length;
+  const nameCell = x => { const td = el('td'); td.append(el('div', 'pick', x.name)); return td; };
+
+  const cbox = $('#classlist'); cbox.innerHTML = '';
+  tableInto(cbox, [
+    { h: 'Class', key: c => c.name, cell: nameCell },
+    { h: 'Hits/level', cls: 'num', dir: -1, key: c => c.maxHits,
+      title: 'Sorts on the top of the roll.',
+      cell: c => el('td', 'num', `${c.minHits}–${c.maxHits}`) },
+    { h: 'Combat', cls: 'num', dir: -1, key: c => c.combat,
+      title: 'Drives how much energy a swing costs — higher swings faster.',
+      cell: c => el('td', 'num', String(c.combat)) },
+    { h: 'Weapons', key: c => D.classWeaponNames[c.weaponType] || '',
+      cell: c => el('td', null, D.classWeaponNames[c.weaponType] || '—') },
+    { h: 'Armour', key: c => c.armourType,
+      title: 'Sorts by how heavy a material the class may wear.',
+      cell: c => el('td', null, 'up to ' + (D.armourTypes[c.armourType] || '—')) },
+    { h: 'Magery', key: c => (spellCount(c) ? c.magery * 100 + c.mageryLvl : -1),
+      cell: c => el('td', null, spellCount(c)
+        ? `${D.mageryNames[c.magery]} ${c.mageryLvl}` : 'none') },
+    { h: 'Spells', cls: 'num', dir: -1, key: spellCount,
+      cell: c => el('td', 'num', spellCount(c) ? String(spellCount(c)) : '—') },
+    { h: 'Innate', key: c => abilBits(c.abils).join(' · '),
+      cell: c => el('td', 'bonus', abilBits(c.abils).join(' · ')) },
+  ], D.classes, {
+    id: 'classes', sort: 0, redraw: renderClassRace, tie: tieByName,
+    cap: D.classes.length, rowClass: c => (c.n === S.cls ? 'is-mine' : ''),
+  });
+
+  const rbox = $('#racelist'); rbox.innerHTML = '';
+  tableInto(rbox, [
+    { h: 'Race', key: r => r.name, cell: nameCell },
+    ...RACE_STATS.map(([k, label]) => ({
+      h: label, cls: 'num', dir: -1, key: r => r.max[k],
+      title: 'Sorts on the top of the band — the ceiling is what you can train to.',
+      cell: r => {
+        const td = el('td', 'num', `${r.min[k]}–${r.max[k]}`);
+        if (r.max[k] >= 110) td.classList.add('up');
+        return td;
+      },
+    })),
+    { h: 'HP/level', cls: 'num', dir: -1, key: r => r.hpPerLvl || 0,
+      cell: r => el('td', 'num', r.hpPerLvl ? '+' + r.hpPerLvl : '—') },
+    { h: 'Innate', key: r => abilBits(r.abils).join(' · '),
+      cell: r => el('td', 'bonus', abilBits(r.abils).join(' · ')) },
+  ], D.races, {
+    id: 'races', sort: 0, redraw: renderClassRace, tie: tieByName,
+    cap: D.races.length, rowClass: r => (r.n === S.race ? 'is-mine' : ''),
+  });
+}
+
+/* ------------------------------------------------------------ monsters */
+
+/* Items are the side of the drop table the export carries, so the bestiary's
+ * own loot list is built by turning it around once. */
+let dropIndex = null;
+function dropsByMonster() {
+  if (dropIndex) return dropIndex;
+  dropIndex = new Map();
+  for (const it of D.items) {
+    for (const [mn, pct] of it.drop || []) {
+      if (!dropIndex.has(mn)) dropIndex.set(mn, []);
+      dropIndex.get(mn).push({ it, pct });
+    }
+  }
+  for (const rows of dropIndex.values()) {
+    rows.sort((a, b) => b.pct - a.pct || a.it.name.localeCompare(b.it.name));
+  }
+  return dropIndex;
+}
+
+function renderMonsters() {
+  const drops = dropsByMonster();
+  const q = $('#m-q').value.trim().toLowerCase();
+  const mp = $('#m-map').value;
+
+  let list = D.monsters || [];
+  if ($('#m-ingame').checked) list = list.filter(m => m.inGame);
+  if ($('#m-drops').checked) list = list.filter(m => drops.has(m.n));
+  if (mp !== '') list = list.filter(m => (m.maps || []).includes(+mp));
+  if (q) {
+    // Searching an item name is the question you actually have here -- "what do
+    // I have to kill for this" -- so the name matches the loot as well.
+    list = list.filter(m => m.name.toLowerCase().includes(q) ||
+      (drops.get(m.n) || []).some(d => d.it.name.toLowerCase().includes(q)));
+  }
+
+  const located = list.filter(m => m.maps && m.maps.length).length;
+  $('#m-note').textContent =
+    `${list.length} monster${list.length === 1 ? '' : 's'} shown, ${located} of them located. ` +
+    'Whereabouts come from the room table — the monster fixed to a room, plus every lair ' +
+    'list that names it — so a widely-lairing wanderer shows several regions and the rest ' +
+    'say nothing rather than guess. Drop chances are the database’s own percentages.' + SORT_HINT;
+
+  const box = $('#monsters'); box.innerHTML = '';
+  if (!list.length) { box.append(el('div', 'empty', 'No monsters match.')); return; }
+
+  // Where a monster lives sorts by region, hardest first, so the unlocated ones
+  // fall to the bottom of the list rather than the top of it.
+  const whereOrder = m => (m.maps && m.maps.length
+    ? Math.max(...m.maps.map(n => TIER_ORDER.indexOf((mapByNum.get(n) || {}).tier) + 1))
+    : -1);
+  const mid = m => (m.dmg ? (m.dmg[0] + m.dmg[1]) / 2 : (m.avgDmg || 0));
+  const loot = m => drops.get(m.n) || [];
+
+  tableInto(box, [
+    { h: 'Monster', key: m => m.name, cell: m => {
+        const td = el('td');
+        td.append(el('div', 'pick', m.name || 'monster #' + m.n));
+        const tags = [];
+        if (m.undead) tags.push(['mag', 'undead']);
+        if (m.atts > 1) tags.push(['', `${m.atts} attacks`]);
+        if (m.special) tags.push(['mag', `${m.special} special`]);
+        if (!m.inGame) tags.push(['', 'not in game']);
+        if (tags.length) {
+          const sub = el('div', 'tags');
+          for (const [k, t] of tags) sub.append(el('span', 'tag' + (k ? ' ' + k : ''), t));
+          td.append(sub);
+        }
+        return td;
+      } },
+    { h: 'Exp', cls: 'num', dir: -1, key: m => m.exp || 0,
+      cell: m => el('td', 'num', (m.exp || 0).toLocaleString()) },
+    { h: 'HP', cls: 'num', dir: -1, key: m => m.hp || 0,
+      cell: m => el('td', 'num', (m.hp || 0).toLocaleString()) },
+    { h: 'AC', cls: 'num', dir: -1, key: m => m.ac || 0,
+      cell: m => el('td', 'num', String(m.ac || 0)) },
+    { h: 'MR', cls: 'num', dir: -1, key: m => m.mr || 0,
+      cell: m => el('td', 'num', m.mr ? String(m.mr) : '—') },
+    { h: 'Damage', cls: 'num', dir: -1, key: mid,
+      title: 'Sorts on the middle of the spread, or on the game’s own average for a caster.',
+      cell: m => {
+        // The spread is its physical swings only. A spell or special attack
+        // stores a flat 100 where the minimum should be, so those are counted as
+        // tags instead and the game's own weighted average stands in for them.
+        const td = el('td', 'num', m.dmg ? `${m.dmg[0]}–${m.dmg[1]}`
+                                         : m.avgDmg ? `~${m.avgDmg}` : '—');
+        if (m.dmg) {
+          td.title = `the combined spread of its ${m.atts} physical ` +
+                     `attack${m.atts === 1 ? '' : 's'}` +
+                     (m.special ? `, plus ${m.special} special attack${m.special === 1 ? '' : 's'}` : '') +
+                     (m.avgDmg ? `; the game’s own weighted average is ${m.avgDmg}` : '');
+        } else if (m.avgDmg) {
+          td.title = 'It has no ordinary swing — this is the game’s own average damage, ' +
+                     'across attacks whose stored min/max are not damage values.';
+        }
+        return td;
+      } },
+    { h: 'Where', dir: -1, key: whereOrder,
+      title: 'Sorts by the toughest region it is found in; unlocated monsters sort last.',
+      cell: m => {
+        const where = monLocText(m);
+        const td = el('td', 'bonus', where || 'location unknown');
+        if (!where) td.classList.add('imp-none');
+        return td;
+      } },
+    { h: 'Drops', dir: -1, key: m => loot(m).length,
+      title: 'Sorts by how much it carries.',
+      cell: m => {
+        const rows = loot(m);
+        const td = el('td', 'bonus');
+        if (!rows.length) { td.append(el('span', 'imp-none', '—')); return td; }
+        const shown = rows.slice(0, 3).map(d => `${d.it.name} ${d.pct}%`).join(' · ');
+        const span = el('span', null, shown + (rows.length > 3 ? ` · +${rows.length - 3} more` : ''));
+        span.title = rows.map(d => `- ${d.it.name} (${d.pct}%)`).join('\n');
+        span.classList.add('has-shop');
+        td.append(span);
+        return td;
+      } },
+  ], list, { id: 'monsters', sort: 1, redraw: renderMonsters, tie: tieByName });
+}
+
+/* --------------------------------------------------------------- shops */
+
+/* Shops are stored on the item -- Items.buy is "which shops stock me" -- so the
+ * stock list is the same turn-around the drop index does. */
+let stockIndex = null;
+function stockByShop() {
+  if (stockIndex) return stockIndex;
+  stockIndex = new Map();
+  for (const it of D.items) {
+    for (const [sn, max] of it.buy || []) {
+      if (!stockIndex.has(sn)) stockIndex.set(sn, []);
+      stockIndex.get(sn).push({ it, max });
+    }
+  }
+  for (const rows of stockIndex.values()) rows.sort((a, b) => a.it.name.localeCompare(b.it.name));
+  return stockIndex;
+}
+
+function renderShops() {
+  const stock = stockByShop();
+  const q = $('#sh-q').value.trim().toLowerCase();
+  const tier = $('#sh-tier').value;
+  const sort = $('#sh-sort').value;
+  const charm = S.base.cha || 0;
+
+  let list = D.shops.slice();
+  if ($('#sh-on').checked) list = list.filter(sh => enabledShops.has(sh.n));
+  if (tier) list = list.filter(sh => {
+    const m = mapByNum.get(shopMap(sh));
+    return m && m.tier === tier;
+  });
+  if (q) list = list.filter(sh =>
+    (sh.name || '').toLowerCase().includes(q) ||
+    (sh.locs || []).some(l => (l.name || '').toLowerCase().includes(q)) ||
+    (stock.get(sh.n) || []).some(r => r.it.name.toLowerCase().includes(q)));
+
+  const tierRank = sh => {
+    const m = mapByNum.get(shopMap(sh));
+    return m ? TIER_ORDER.indexOf(m.tier) : 99;
+  };
+  // Shops are cards rather than rows -- each one carries its own stock table --
+  // so this select is the one sort control the tabs still need.
+  const cmp = {
+    tier: (a, b) => tierRank(a) - tierRank(b) || shopMap(a) - shopMap(b),
+    name: (a, b) => (a.name || '').localeCompare(b.name || ''),
+    stock: (a, b) => (stock.get(b.n) || []).length - (stock.get(a.n) || []).length,
+    markup: (a, b) => a.markup - b.markup,
+  }[sort];
+  list = list.slice().sort((a, b) => cmp(a, b) || (a.name || '').localeCompare(b.name || ''));
+
+  $('#sh-note').textContent =
+    `${list.length} shop${list.length === 1 ? '' : 's'}. Prices are what you would pay: base ` +
+    'value plus the shop’s markup, then scaled by your Charm' +
+    (charm ? ` (${charm}, so ${charm >= 50 ? 'a discount' : 'a surcharge'})` : ' — which is unset, so no adjustment') +
+    '. A shop is placed by region because there is no reachability field in the data; the ' +
+    'Optimize tab is where you switch regions off, and this tab shows what that leaves out.' +
+    ' Open a shop to see its stock, whose columns sort like every other table.';
+
+  const box = $('#shops'); box.innerHTML = '';
+  if (!list.length) { box.append(el('div', 'empty', 'No shops match.')); return; }
+
+  for (const sh of list) {
+    const rows = stock.get(sh.n) || [];
+    const map = mapByNum.get(shopMap(sh));
+    const card = el('div', 'shopgrp');
+
+    const hdr = el('div', 'shophdr');
+    hdr.append(el('strong', null, sh.name || 'Shop #' + sh.n));
+    if (map) hdr.append(el('span', 'tier ' + map.tier, `map ${map.n} · ${map.tier}`));
+    if (!enabledShops.has(sh.n)) {
+      const off = el('span', 'tag lim', 'off in the optimizer');
+      off.title = 'Turned off under “Shops to consider” on the Optimize tab, so its prices ' +
+                  'are not quoted there.';
+      hdr.append(off);
+    }
+    if (sh.classRest) hdr.append(el('span', 'tag own', listOfClasses([sh.classRest]) + ' only'));
+    const meta = [];
+    meta.push(shopLocText(sh) || 'location unknown');
+    meta.push(`${sh.markup}% markup`);
+    meta.push(`${rows.length} item${rows.length === 1 ? '' : 's'}`);
+    hdr.append(el('span', 'meta', meta.join(' · ')));
+    card.append(hdr);
+
+    if (rows.length) {
+      const det = el('details');
+      det.append(el('summary', null, `what it stocks (${rows.length})`));
+      const holder = el('div');
+      const kindOf = it => it.type === 1 ? (D.weaponTypes[it.wtype] || 'Weapon')
+        : it.type === 0 && it.slot != null ? SLOT.get(it.slot).name.replace(/ \d$/, '')
+        : (D.itemTypes[it.type] || '—');
+      const bitsOf = it => {
+        const bits = effectBits(it);
+        if (it.type === 1) bits.unshift(`${it.min}–${it.max} damage`);
+        return bits;
+      };
+      // Each shop keeps its own sort, and redraws only its own table.
+      const build = () => {
+        holder.innerHTML = '';
+        tableInto(holder, [
+          { h: 'Item', key: r => r.it.name, cell: r => itemNameCell(r.it) },
+          { h: 'Kind', key: r => kindOf(r.it), cell: r => el('td', 'slotname', kindOf(r.it)) },
+          { h: 'Price here', cls: 'num', key: r => buyCost(r.it, sh.markup, charm),
+            title: 'Base value plus this shop’s markup, scaled by your Charm.',
+            cell: r => el('td', 'num', priceText(buyCost(r.it, sh.markup, charm))) },
+          { h: 'In stock', cls: 'num', dir: -1, key: r => r.max,
+            cell: r => el('td', 'num', String(r.max)) },
+          { h: 'Enc', cls: 'num', key: r => r.it.enc || 0,
+            cell: r => el('td', 'num', (r.it.enc || 0).toLocaleString()) },
+          { h: 'Effects', key: r => bitsOf(r.it).join(' · '),
+            cell: r => el('td', 'bonus', bitsOf(r.it).join(' · ')) },
+        ], rows, {
+          id: 'shop:' + sh.n, sort: 0, redraw: build, cap: rows.length,
+          tie: (a, b) => a.it.name.localeCompare(b.it.name),
+        });
+      };
+      // Built on first open: 87 shops' worth of stock tables up front is a lot
+      // of DOM for something you look at one shop at a time.
+      let built = false;
+      det.addEventListener('toggle', () => {
+        if (built || !det.open) return;
+        built = true;
+        build();
+      });
+      det.append(holder);
+      card.append(det);
+    }
+    box.append(card);
+  }
 }
 
 /* ----------------------------------------------------------------- wire */
+
+const TAB_RENDER = {
+  spells: renderSpells, weapons: renderWeapons, armour: renderArmour,
+  sundry: renderSundry, classes: renderClassRace, monsters: renderMonsters,
+  shops: renderShops,
+};
+
+/* Every reference tab is quoted for the active character, so switching roster
+ * slots has to redraw whichever one is open. */
+function refreshActiveTab() {
+  const active = document.querySelector('.tab.is-active');
+  const fn = active && TAB_RENDER[active.dataset.tab];
+  if (fn) fn();
+}
+
 
 function runOptimize() {
   syncStateFromForm();
@@ -1925,8 +2690,8 @@ function init() {
     const b = e.target.closest('.tab'); if (!b) return;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t === b));
     document.querySelectorAll('.panel').forEach(p => p.classList.toggle('is-active', p.id === 'tab-' + b.dataset.tab));
-    if (b.dataset.tab === 'browse') renderBrowse();
-    if (b.dataset.tab === 'spells') renderSpells();
+    const render = TAB_RENDER[b.dataset.tab];
+    if (render) render();
   });
 
   $('#paste').addEventListener('input', () => { S.paste = $('#paste').value; touch(); });
@@ -1997,9 +2762,14 @@ function init() {
     return m && (m.tier === 'starter' || m.tier === 'low');
   }));
 
-  ['q','q-slot','q-sort','q-usable'].forEach(id => $('#' + id).addEventListener('input', renderBrowse));
+  const wire = (ids, fn) => ids.forEach(id => $('#' + id).addEventListener('input', fn));
+  wire(['w-q','w-type','w-usable','w-ingame'], renderWeapons);
+  wire(['a-q','a-slot','a-type','a-usable','a-ingame'], renderArmour);
+  wire(['u-q','u-type','u-usable','u-ingame'], renderSundry);
+  wire(['m-q','m-map','m-drops','m-ingame'], renderMonsters);
+  wire(['sh-q','sh-tier','sh-sort','sh-on'], renderShops);
 
-  ['sp-q','sp-sort','sp-known']
+  ['sp-q','sp-known']
     .forEach(id => $('#' + id).addEventListener('input', renderSpells));
   ['sp-class','sp-level','sp-sc','sp-bonus','sp-align'].forEach(id =>
     $('#' + id).addEventListener('input', () => { spellsOverridden = true; renderSpells(); }));

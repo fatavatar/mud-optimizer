@@ -243,3 +243,38 @@ td.source{font-size:11.5px;max-width:210px}
 .src.drop{color:var(--violet)}
 .src.none{color:var(--ink-faint)}
 .tag.drop{color:var(--violet);border-color:#4a3d6b}
+
+/* ------------------------------------------- reference tabs */
+/* Nine tabs no longer fit one line on a laptop, so let them wrap rather than
+   squeezing the labels. */
+.tabs{flex-wrap:wrap}
+
+/* The row for the class or race the active character actually is. */
+tr.is-mine td{background:#171d26}
+tr.is-mine .pick{color:var(--amber)}
+
+/* An item the active character cannot use is dimmed rather than hidden: with
+   "usable by me" off you are deliberately looking at what you are missing. */
+td.locked{opacity:.55}
+td.locked .pick{text-decoration:line-through var(--line-2)}
+
+/* Every column with an order worth having is a button. The arrow marks the one
+   the table is actually sorted by; a second click reverses it. */
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortable:hover{color:var(--ink);background:var(--bg-3)}
+th.sortable:focus-visible{outline:1px solid var(--line-2);outline-offset:-1px;color:var(--ink)}
+th.sorted{color:var(--amber)}
+th .arrow{margin-left:5px;font-size:9px;vertical-align:1px}
+
+/* Shops render as cards with their stock folded away -- 87 shops' stock tables
+   at once is a lot of page for something read one shop at a time. */
+.shopgrp details{margin:8px 0 0 2px}
+.shopgrp summary{
+  cursor:pointer;font-size:11.5px;color:var(--ink-dim);
+  padding:4px 0;letter-spacing:.03em;
+}
+.shopgrp summary:hover{color:var(--ink)}
+.shopgrp details[open] summary{color:var(--ink)}
+.shopgrp .tablewrap{max-height:340px;margin:6px 0 4px}
+.shopgrp .shophdr strong{font-weight:600}
+.shopgrp .shophdr .tag{margin-left:2px}
