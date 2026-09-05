@@ -535,21 +535,6 @@ function dropTooltip(it) {
   return `Dropped by ${rows.length} monster${rows.length > 1 ? 's' : ''}:\n` + rows.join('\n');
 }
 
-/* Where an item can come from at all, in one line for a table cell. */
-function sourceText(it) {
-  const bb = bestBuy(it);
-  if (bb) return { text: priceText(bb.cost), title: shopTooltip(it), kind: 'shop' };
-  const d = bestDrop(it);
-  if (d) {
-    return {
-      text: `${d.mon.name || 'monster #' + d.mon.n} ${d.pct}%`,
-      title: dropTooltip(it),
-      kind: 'drop',
-    };
-  }
-  return { text: 'no known source', title: '', kind: 'none' };
-}
-
 /* ---------------------------------------------------------- eligibility */
 
 /* The restrictions that apply to any item at all, worn or not: level band,
@@ -1376,7 +1361,9 @@ function renderEquipped() {
   for (const s of entries) {
     const it = S.equipped[s.i];
     const r = el('div', 'eqrow');
-    r.append(el('span', 'nm', it.name), el('span', 'loc', s.name));
+    const nm = el('span', 'nm');
+    nm.append(xref(it.name, `Open ${it.name} on the ${itemTab(it)} tab.`, () => goToItem(it)));
+    r.append(nm, el('span', 'loc', s.name));
     box.append(r);
   }
   for (const u of S.unmatched) {
@@ -1389,7 +1376,9 @@ function renderEquipped() {
   const cb = $('#carrylist'); cb.innerHTML = '';
   for (const it of S.carried) {
     const r = el('div', 'eqrow');
-    r.append(el('span', 'nm', it.name), el('span', 'loc', SLOT.get(it.slot) ? SLOT.get(it.slot).name : D.itemTypes[it.type]));
+    const nm = el('span', 'nm');
+    nm.append(xref(it.name, `Open ${it.name} on the ${itemTab(it)} tab.`, () => goToItem(it)));
+    r.append(nm, el('span', 'loc', SLOT.get(it.slot) ? SLOT.get(it.slot).name : D.itemTypes[it.type]));
     cb.append(r);
   }
   $('#carry-count').textContent = S.carried.length ? `(${S.carried.length})` : '';
@@ -1585,14 +1574,22 @@ function renderResults(res) {
       title: 'Sorts back into the order you wear it in.',
       cell: r => el('td', 'slotname', r.sl.name) },
     { h: 'Currently', key: r => (r.od ? r.od.name : ''),
-      cell: r => el('td', 'cur', r.od ? r.od.name : '—') },
+      cell: r => {
+        const td = el('td', 'cur');
+        if (r.od) td.append(xref(r.od.name, `Open ${r.od.name} on the ${itemTab(r.od)} tab.`,
+          () => goToItem(r.od)));
+        else td.textContent = '—';
+        return td;
+      } },
     { h: 'Recommended', key: r => (r.nw ? r.nw.name : ''), cell: r => {
         const { nw } = r;
         const td = el('td');
-        const nameEl = el('div', 'pick' + (r.changed ? ' changed' : ''), nw ? nw.name : '— leave empty —');
+        const nameEl = el('div', 'pick' + (r.changed ? ' changed' : ''));
         if (nw) {
-          const tip = shopTooltip(nw);         // empty once every stocking shop is switched off
-          if (tip) { nameEl.title = tip; nameEl.classList.add('has-shop'); }
+          nameEl.append(xref(nw.name, shopTooltip(nw) ||        // empty once every stocking shop is off
+            `Open ${nw.name} on the ${itemTab(nw)} tab.`, () => goToItem(nw)));
+        } else {
+          nameEl.textContent = '— leave empty —';
         }
         td.append(nameEl);
         if (nw) {
@@ -1631,16 +1628,12 @@ function renderResults(res) {
         const td = el('td', 'source');
         if (!nw) td.textContent = '—';
         else if (isOwned(nw)) td.append(el('span', 'imp-none', 'you have it'));
-        else {
-          const src = sourceText(nw);
-          const sp = el('span', 'src ' + src.kind, src.text);
-          if (src.title) { sp.title = src.title; sp.classList.add('has-shop'); }
-          td.append(sp);
-        }
+        else sourceInto(td, nw);
         return td;
       } },
   ], rows, {
     id: 'results', sort: 0, cap: rows.length, redraw: () => renderResults(res),
+    rowKey: r => (r.nw ? 'item:' + r.nw.n : 'slot:' + r.sl.i),
     tie: (a, b) => a.order - b.order,
   });
 
@@ -1872,6 +1865,7 @@ function renderSpells() {
       } },
   ], list, {
     id: 'spells', sort: 1, redraw: renderSpells, cap: list.length,
+    rowKey: sp => 'spell:' + sp.n,
     tie: (a, b) => a.req - b.req || a.name.localeCompare(b.name),
     rowClass: sp => (level > 0 && level < sp.req ? 'locked' : ''),
   });
@@ -1969,9 +1963,17 @@ function itemTags(it) {
   return out;
 }
 
-function itemNameCell(it) {
+function itemNameCell(it, opt) {
   const td = el('td');
-  td.append(el('div', 'pick', it.name));
+  // On the item's own tab the name is just the name; anywhere else -- a shop's
+  // stock, the recommendation -- it is a way through to the full entry.
+  if (opt && opt.link) {
+    const line = el('div', 'pick');
+    line.append(xref(it.name, `Open ${it.name} on the ${itemTab(it)} tab.`, () => goToItem(it)));
+    td.append(line);
+  } else {
+    td.append(el('div', 'pick', it.name));
+  }
   const tags = itemTags(it);
   if (tags.length) {
     const sub = el('div', 'tags');
@@ -1982,8 +1984,8 @@ function itemNameCell(it) {
   // only the restrictions that gate any item at all decide whether it is struck
   // through. Nothing is hidden here -- with "usable by me" off you are
   // deliberately looking at what you cannot have.
-  const opt = { allowLimited: true, allowCursed: true };
-  const ok = isSundry(it) ? passesRestrictions(it, opt) : isUsable(it, opt);
+  const rules = { allowLimited: true, allowCursed: true };
+  const ok = isSundry(it) ? passesRestrictions(it, rules) : isUsable(it, rules);
   if (S.cls && !ok) {
     td.classList.add('locked');
     td.title = 'Your class, race, level or alignment rules this one out.';
@@ -1991,27 +1993,208 @@ function itemNameCell(it) {
   return td;
 }
 
-/* Where an item comes from, leading with the shop price when there is one --
- * that is the route you control -- and naming the best drop otherwise. An item
- * that is both sold and dropped keeps both tooltips. */
-function sourceCell(it) {
-  const td = el('td', 'bonus');
-  const s = sourceText(it);
-  let text = s.text;
-  const tips = [];
-  if ((activeBuy(it) || []).length) tips.push(shopTooltip(it));
-  if (it.drop && it.drop.length) tips.push(dropTooltip(it));
-  if (s.kind === 'none' && it.from) {
-    // Not sold and not dropped, but the export still knows where it turned up:
-    // a room, a text block, or inside another item.
-    text = it.from.length > 44 ? it.from.slice(0, 44) + '…' : it.from;
-    tips.push(it.from);
+/* ---------------------------------------------------------- cross-references */
+/* Nearly every cell on these tabs names something that is a row on another one:
+ * the monster that drops a sword, the shop that sells it, the region it lives
+ * in. Those names are links, and following one switches tab, relaxes any filter
+ * that would hide what you are being sent to, and flashes the row when it gets
+ * there. */
+
+/* The row the next render should flash, set by a link and consumed by whatever
+ * table draws next. It never outlives the render it was set for. */
+let pendingFlash = null;
+
+/* The same thing the tab bar does, so a link and a click agree. */
+function activateTab(name) {
+  const btn = document.querySelector(`.tab[data-tab="${name}"]`);
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t === btn));
+  document.querySelectorAll('.panel')
+    .forEach(p => p.classList.toggle('is-active', p.id === 'tab-' + name));
+  const render = TAB_RENDER[name];
+  if (render) render();
+}
+
+function goTo(tab, key) {
+  pendingFlash = key;
+  try { activateTab(tab); } finally { pendingFlash = null; }
+}
+
+/* Mark the row a link aimed at, and bring it into view. */
+function flashInto(node) {
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1600);
+  if (typeof node.scrollIntoView === 'function') {
+    node.scrollIntoView({ block: 'center' });        // jsdom has no layout; guarded above
   }
-  const span = el('span', 'src ' + s.kind, text);
-  const tip = tips.filter(Boolean).join('\n\n');
-  if (tip) { span.title = tip; span.classList.add('has-shop'); }
-  td.append(span);
+}
+
+/* A reference to something on another tab. It is a real link so it can be
+ * tabbed to and reads as one, but it moves around the page, not the web. */
+function xref(text, title, go) {
+  const a = el('a', 'xref', text);
+  a.href = '#';
+  if (title) a.title = title;
+  a.addEventListener('click', e => { e.preventDefault(); go(); });
+  return a;
+}
+
+/* Which tab an item is listed on. */
+const itemTab = it => (it.type === 1 ? 'weapons'
+                     : it.type === 0 && it.slot != null ? 'armour' : 'sundry');
+
+const ITEM_TAB_IDS = {
+  weapons: { q: 'w-q', usable: 'w-usable', ingame: 'w-ingame', clear: ['w-type'] },
+  armour: { q: 'a-q', usable: 'a-usable', ingame: 'a-ingame', clear: ['a-slot', 'a-type'] },
+  sundry: { q: 'u-q', usable: 'u-usable', ingame: 'u-ingame', clear: ['u-type'] },
+};
+
+/* Send someone to an item. The filters on the target tab are relaxed only where
+ * they would hide the very thing the link points at -- following a link should
+ * never land you on "nothing matches", and should never quietly widen a filter
+ * that was not in the way. */
+/* Which of a tab's filters would hide this item, and so have to give way for a
+ * link to land on it. Everything else is left exactly as the user set it. */
+function hidesItem(it) {
+  const rules = { allowLimited: true, allowCursed: true };
+  const allowed = isSundry(it) ? passesRestrictions(it, rules) : isUsable(it, rules);
+  return { usable: !!S.cls && !allowed, ingame: !it.inGame };
+}
+
+function goToItem(it) {
+  const tab = itemTab(it);
+  const ids = ITEM_TAB_IDS[tab];
+  const hidden = hidesItem(it);
+  $('#' + ids.q).value = it.name;
+  for (const id of ids.clear) $('#' + id).value = '';
+  if (hidden.usable) $('#' + ids.usable).checked = false;
+  if (hidden.ingame) $('#' + ids.ingame).checked = false;
+  goTo(tab, 'item:' + it.n);
+}
+
+function goToMonster(m) {
+  $('#m-q').value = m.name || '';
+  $('#m-map').value = '';
+  if (!m.inGame) $('#m-ingame').checked = false;
+  if (!dropsByMonster().has(m.n)) $('#m-drops').checked = false;
+  goTo('monsters', 'mon:' + m.n);
+}
+
+/* Everything that drops this item. The Monsters search matches loot as well as
+ * names, so the item's own name is the query that lists them all. */
+function goToDroppers(it) {
+  const mons = (it.drop || []).map(([n]) => monByNum.get(n)).filter(Boolean);
+  $('#m-q').value = it.name;
+  $('#m-map').value = '';
+  if (mons.length && !mons.some(m => m.inGame)) $('#m-ingame').checked = false;
+  goTo('monsters', 'item-drops:' + it.n);
+}
+
+function goToShop(sh) {
+  $('#sh-q').value = sh.name || '';
+  $('#sh-tier').value = '';
+  if (!enabledShops.has(sh.n)) $('#sh-on').checked = false;
+  goTo('shops', 'shop:' + sh.n);
+}
+
+/* Every shop that stocks this item -- the Shops search matches stock too. */
+function goToStockists(it) {
+  const shops = (it.buy || []).map(([n]) => shopByNum.get(n)).filter(Boolean);
+  $('#sh-q').value = it.name;
+  $('#sh-tier').value = '';
+  if (shops.length && !shops.some(sh => enabledShops.has(sh.n))) $('#sh-on').checked = false;
+  goTo('shops', 'item-shops:' + it.n);
+}
+
+function goToRegion(mapNum) {
+  $('#m-q').value = '';
+  $('#m-map').value = String(mapNum);
+  goTo('monsters', 'region:' + mapNum);
+}
+
+/* ------------------------------------------------------------ source cells */
+
+/* Where an item comes from, as links: the shop price leads when there is one --
+ * that is the route you control -- and the best drop otherwise. An item that is
+ * both sold and dropped shows both, because either route counts. */
+function sourceInto(td, it) {
+  const buys = activeBuy(it) || [];
+  const bb = bestBuy(it);
+  const drops = (it.drop || []).filter(([n]) => monByNum.has(n));
+  const sep = () => td.append(document.createTextNode(' · '));
+
+  if (bb) {
+    const a = xref(priceText(bb.cost), shopTooltip(it), () => goToShop(bb.shop));
+    a.classList.add('src', 'shop');
+    td.append(a);
+    if (buys.length > 1) {
+      sep();
+      td.append(xref(`${buys.length} shops`,
+        'Every shop that stocks it, on the Shops tab.', () => goToStockists(it)));
+    }
+  }
+
+  if (drops.length) {
+    const best = bestDrop(it);
+    if (bb) sep();
+    const a = xref(`${best.mon.name || 'monster #' + best.mon.n} ${best.pct}%`,
+      dropTooltip(it), () => goToMonster(best.mon));
+    a.classList.add('src', 'drop');
+    td.append(a);
+    if (drops.length > 1) {
+      sep();
+      td.append(xref(`+${drops.length - 1} more`,
+        'Every monster that drops it, on the Monsters tab.', () => goToDroppers(it)));
+    }
+  }
+
+  if (!bb && !drops.length) {
+    // Not sold and not dropped, but the export still knows where it turned up:
+    // a room, a text block, or inside another item. The numbered ones are
+    // references too, so they get resolved to names and linked like the rest.
+    if (it.from) td.append(fromRefs(it.from));
+    else td.append(el('span', 'src none', 'no known source'));
+  }
   return td;
+}
+
+function sourceCell(it) {
+  return sourceInto(el('td', 'bonus'), it);
+}
+
+/* `Items.from` is a comma-separated trail of raw references -- "Item #1727(68.4%),
+ * Monster #72(1%), Room 1/2231". The numbered ones name rows we hold, so they
+ * are shown by name and linked; rooms and text blocks stay as they are. */
+const FROM_REF = /^(Item|Monster|NPC|Shop(?:\([a-z]+\))?)\s*#(\d+)\s*(\(.*\))?$/i;
+
+function fromRefs(from) {
+  const frag = document.createDocumentFragment();
+  from.split(',').map(p => p.trim()).filter(Boolean).forEach((part, i) => {
+    if (i) frag.append(document.createTextNode(' · '));
+    const m = FROM_REF.exec(part);
+    const suffix = m && m[3] ? ' ' + m[3] : '';
+    const kind = m ? m[1].toLowerCase() : '';
+    const num = m ? +m[2] : 0;
+
+    if (kind === 'item' && byNum.has(num)) {
+      const src = byNum.get(num);
+      frag.append(xref(src.name + suffix, `Item #${num} — open it`, () => goToItem(src)));
+      return;
+    }
+    if ((kind === 'monster' || kind === 'npc') && monByNum.has(num)) {
+      const mon = monByNum.get(num);
+      frag.append(xref((mon.name || 'monster #' + num) + suffix,
+        `Monster #${num} — open it`, () => goToMonster(mon)));
+      return;
+    }
+    if (kind.startsWith('shop') && shopByNum.has(num)) {
+      const sh = shopByNum.get(num);
+      const label = (sh.name || 'shop #' + num) + (kind === 'shop(sell)' ? ' (sell only)' : '') + suffix;
+      frag.append(xref(label, `Shop #${num} — open it`, () => goToShop(sh)));
+      return;
+    }
+    frag.append(el('span', 'src none', part));
+  });
+  return frag;
 }
 
 /* The Sort dropdowns these tabs used to carry are gone -- the headings do that
@@ -2128,6 +2311,12 @@ function tableInto(box, cols, list, opt) {
   for (const x of rows.slice(0, limit)) {
     const tr = el('tr');
     if (o.rowClass) { const rc = o.rowClass(x); if (rc) tr.className = rc; }
+    // The key is how a link from another tab finds the row it was aiming at.
+    const key = o.rowKey ? o.rowKey(x) : null;
+    if (key) {
+      tr.dataset.key = key;
+      if (key === pendingFlash) flashInto(tr);
+    }
     for (const c of cols) tr.append(c.cell(x));
     tb.append(tr);
   }
@@ -2208,7 +2397,8 @@ function renderWeapons() {
       } },
     { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
       title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
-  ], list, { id: 'weapons', sort: 6, redraw: renderWeapons, tie: tieByName });
+  ], list, { id: 'weapons', sort: 6, redraw: renderWeapons, tie: tieByName,
+     rowKey: it => 'item:' + it.n });
 }
 
 /* -------------------------------------------------------------- armour */
@@ -2267,7 +2457,8 @@ function renderArmour() {
       cell: it => el('td', 'bonus', effectBits(it, skip).join(' · ')) },
     { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
       title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
-  ], list, { id: 'armour', sort: 3, redraw: renderArmour, tie: tieByName });
+  ], list, { id: 'armour', sort: 3, redraw: renderArmour, tie: tieByName,
+     rowKey: it => 'item:' + it.n });
 }
 
 /* -------------------------------------------------------------- sundry */
@@ -2313,7 +2504,8 @@ function renderSundry() {
       cell: it => el('td', 'bonus', effectBits(it).join(' · ')) },
     { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
       title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
-  ], list, { id: 'sundry', sort: 0, redraw: renderSundry, tie: tieByName, cap: 500 });
+  ], list, { id: 'sundry', sort: 0, redraw: renderSundry, tie: tieByName, cap: 500,
+     rowKey: it => 'item:' + it.n });
 }
 
 /* ---------------------------------------------------- classes and races */
@@ -2364,6 +2556,7 @@ function renderClassRace() {
   ], D.classes, {
     id: 'classes', sort: 0, redraw: renderClassRace, tie: tieByName,
     cap: D.classes.length, rowClass: c => (c.n === S.cls ? 'is-mine' : ''),
+    rowKey: c => 'class:' + c.n,
   });
 
   const rbox = $('#racelist'); rbox.innerHTML = '';
@@ -2385,6 +2578,7 @@ function renderClassRace() {
   ], D.races, {
     id: 'races', sort: 0, redraw: renderClassRace, tie: tieByName,
     cap: D.races.length, rowClass: r => (r.n === S.race ? 'is-mine' : ''),
+    rowKey: r => 'race:' + r.n,
   });
 }
 
@@ -2488,9 +2682,20 @@ function renderMonsters() {
     { h: 'Where', dir: -1, key: whereOrder,
       title: 'Sorts by the toughest region it is found in; unlocated monsters sort last.',
       cell: m => {
-        const where = monLocText(m);
-        const td = el('td', 'bonus', where || 'location unknown');
-        if (!where) td.classList.add('imp-none');
+        const td = el('td', 'bonus');
+        if (!m.maps || !m.maps.length) {
+          td.append(el('span', 'imp-none', 'location unknown'));
+          return td;
+        }
+        // Each region is a link back into this tab, filtered to it: "what else
+        // lives where this thing lives" is the next question you have.
+        m.maps.forEach((n, i) => {
+          if (i) td.append(document.createTextNode(', '));
+          const mp = mapByNum.get(n);
+          td.append(xref(mp ? `map ${n} (${mp.tier})` : `map ${n}`,
+            'Everything else placed in this region.', () => goToRegion(n)));
+        });
+        if (m.room) td.append(document.createTextNode(' — ' + m.room));
         return td;
       } },
     { h: 'Drops', dir: -1, key: m => loot(m).length,
@@ -2499,14 +2704,26 @@ function renderMonsters() {
         const rows = loot(m);
         const td = el('td', 'bonus');
         if (!rows.length) { td.append(el('span', 'imp-none', '—')); return td; }
-        const shown = rows.slice(0, 3).map(d => `${d.it.name} ${d.pct}%`).join(' · ');
-        const span = el('span', null, shown + (rows.length > 3 ? ` · +${rows.length - 3} more` : ''));
-        span.title = rows.map(d => `- ${d.it.name} (${d.pct}%)`).join('\n');
-        span.classList.add('has-shop');
-        td.append(span);
+        // Three at a time, because a dragon carries a dozen; the rest unfold
+        // here rather than on a tab of their own.
+        const fill = all => {
+          td.innerHTML = '';
+          const show = all ? rows : rows.slice(0, 3);
+          show.forEach((d, i) => {
+            if (i) td.append(document.createTextNode(' · '));
+            td.append(xref(`${d.it.name} ${d.pct}%`, 'Open this item.', () => goToItem(d.it)));
+          });
+          if (!all && rows.length > 3) {
+            td.append(document.createTextNode(' · '));
+            td.append(xref(`+${rows.length - 3} more`, 'List everything it carries.',
+              () => fill(true)));
+          }
+        };
+        fill(false);
         return td;
       } },
-  ], list, { id: 'monsters', sort: 1, redraw: renderMonsters, tie: tieByName });
+  ], list, { id: 'monsters', sort: 1, redraw: renderMonsters, tie: tieByName,
+     rowKey: m => 'mon:' + m.n });
 }
 
 /* --------------------------------------------------------------- shops */
@@ -2574,10 +2791,16 @@ function renderShops() {
     const rows = stock.get(sh.n) || [];
     const map = mapByNum.get(shopMap(sh));
     const card = el('div', 'shopgrp');
+    card.dataset.key = 'shop:' + sh.n;
 
     const hdr = el('div', 'shophdr');
     hdr.append(el('strong', null, sh.name || 'Shop #' + sh.n));
-    if (map) hdr.append(el('span', 'tier ' + map.tier, `map ${map.n} · ${map.tier}`));
+    if (map) {
+      const tier = el('span', 'tier ' + map.tier);
+      tier.append(xref(`map ${map.n} · ${map.tier}`,
+        'What lives in this region, on the Monsters tab.', () => goToRegion(map.n)));
+      hdr.append(tier);
+    }
     if (!enabledShops.has(sh.n)) {
       const off = el('span', 'tag lim', 'off in the optimizer');
       off.title = 'Turned off under “Shops to consider” on the Optimize tab, so its prices ' +
@@ -2608,7 +2831,7 @@ function renderShops() {
       const build = () => {
         holder.innerHTML = '';
         tableInto(holder, [
-          { h: 'Item', key: r => r.it.name, cell: r => itemNameCell(r.it) },
+          { h: 'Item', key: r => r.it.name, cell: r => itemNameCell(r.it, { link: true }) },
           { h: 'Kind', key: r => kindOf(r.it), cell: r => el('td', 'slotname', kindOf(r.it)) },
           { h: 'Price here', cls: 'num', key: r => buyCost(r.it, sh.markup, charm),
             title: 'Base value plus this shop’s markup, scaled by your Charm.',
@@ -2622,6 +2845,7 @@ function renderShops() {
         ], rows, {
           id: 'shop:' + sh.n, sort: 0, redraw: build, cap: rows.length,
           tie: (a, b) => a.it.name.localeCompare(b.it.name),
+          rowKey: r => 'item:' + r.it.n,
         });
       };
       // Built on first open: 87 shops' worth of stock tables up front is a lot
@@ -2633,8 +2857,12 @@ function renderShops() {
         build();
       });
       det.append(holder);
+      // A link that came here for this shop wants to see the stock, not a
+      // folded card.
+      if (pendingFlash === 'shop:' + sh.n) { det.open = true; build(); built = true; }
       card.append(det);
     }
+    if (pendingFlash === 'shop:' + sh.n) flashInto(card);
     box.append(card);
   }
 }
@@ -2688,10 +2916,7 @@ function init() {
 
   $('#tabs').addEventListener('click', e => {
     const b = e.target.closest('.tab'); if (!b) return;
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('is-active', t === b));
-    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('is-active', p.id === 'tab-' + b.dataset.tab));
-    const render = TAB_RENDER[b.dataset.tab];
-    if (render) render();
+    activateTab(b.dataset.tab);
   });
 
   $('#paste').addEventListener('input', () => { S.paste = $('#paste').value; touch(); });

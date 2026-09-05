@@ -200,8 +200,6 @@ footer{
 footer p{margin:0}
 
 /* Items with shop provenance carry a hover tooltip listing where to buy them. */
-.has-shop{cursor:help;text-decoration:underline dotted var(--line-2);text-underline-offset:3px}
-.has-shop:hover{text-decoration-color:var(--green)}
 
 /* Shop region filter */
 .shopgrp{border-top:1px solid var(--line);padding:10px 0}
@@ -278,3 +276,26 @@ th .arrow{margin-left:5px;font-size:9px;vertical-align:1px}
 .shopgrp .tablewrap{max-height:340px;margin:6px 0 4px}
 .shopgrp .shophdr strong{font-weight:600}
 .shopgrp .shophdr .tag{margin-left:2px}
+
+/* ------------------------------------------ cross-reference links */
+/* A name that is a row on another tab is a link there. Underlined rather than
+   coloured, so a table of them does not turn into a rainbow. */
+.xref{
+  color:inherit;text-decoration:underline dotted var(--line-2);
+  text-underline-offset:3px;cursor:pointer;
+}
+.xref:hover{color:var(--amber);text-decoration-color:var(--amber)}
+.xref:focus-visible{outline:1px solid var(--line-2);outline-offset:2px;color:var(--amber)}
+.tier .xref{color:inherit;text-decoration-color:currentColor;opacity:.85}
+.tier .xref:hover{opacity:1}
+.eqrow .nm .xref{text-decoration-color:transparent}
+.eqrow:hover .nm .xref{text-decoration-color:var(--line-2)}
+
+/* Where a link lands: hold the row for a moment so the eye finds it. */
+@keyframes flash{
+  0%{background:rgba(232,180,92,.30)}
+  60%{background:rgba(232,180,92,.16)}
+  100%{background:transparent}
+}
+tr.flash td,.shopgrp.flash{animation:flash 1.6s ease-out}
+.shopgrp.flash{border-radius:5px}

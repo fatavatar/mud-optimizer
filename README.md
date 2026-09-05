@@ -108,6 +108,35 @@ order you chose. Because the headings do the whole job, the *Sort* dropdowns
 those tabs used to carry are gone; the Shops tab keeps its one, because shops are
 cards rather than rows.
 
+### Every reference is a link
+
+A weapon says which monster drops it. That monster is a row on another tab, so
+the name is a link that goes there — switching tab, putting the monster in the
+search box, and flashing its row when it arrives. It works in every direction:
+
+| From | To |
+| --- | --- |
+| an item's *Where to get it* | the shop that sells it, opened on its stock, or the monster that drops it |
+| *N shops* / *+N more* beside it | every shop that stocks it, or every monster that drops it |
+| a monster's *Drops* | each item's own entry (*+N more* unfolds the rest in place) |
+| a monster's *Where* | everything else placed in that region |
+| a shop's stock, and its region tag | the item's entry, and what lives around the shop |
+| your worn and carried gear | each item's entry |
+| the recommendation's *Currently* and *Recommended* | what you wear now, and what it would replace |
+
+Following a link should never land you on *nothing matches*, so the target tab's
+filters give way where they would hide what you were sent to — and only there. A
+link to plate armour a Mage cannot wear switches *usable by me* off; a link to
+something they can use changes nothing. Filters that were not in the way are left
+exactly as you set them.
+
+The raw trails in the database are linked too. `Items.from` records where a thing
+turned up as `Item #1727(68.4%), Room 1/2231`; the numbered references name rows
+we hold, so a pristine scroll now reads *large chest (68.4%) · silver casket
+(76%)* instead of item numbers. There are 4,017 such references and every item
+and monster one resolves. Shop numbers that fall outside the exported shop table
+stay as plain text rather than becoming a link that goes nowhere.
+
 Two columns sort on something other than what they print:
 
 - **Where to get it** orders by route rather than alphabetically: what a shop
@@ -443,11 +472,12 @@ see [The game database](#the-game-database) above for where it comes from.
 node test/run.js
 ```
 
-335 assertions covering the formulas, the paste parser, the eligibility rules,
+355 assertions covering the formulas, the paste parser, the eligibility rules,
 the optimizer's invariants, the per-round swing schedule, the marginal pricing of
 crits, the per-swap impact maths, the spell scaling and cast chance, the drop
 tables and their locations, the reference tabs' indexes and item partition, the
-column sort rules, and the character roster's save/restore round trip.
+column sort rules, the cross-reference links and the filters they relax, and
+the character roster's save/restore round trip.
 
 ## How the database was decoded
 

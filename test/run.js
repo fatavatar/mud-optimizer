@@ -27,10 +27,10 @@ vm.runInContext(
   'profileOf,setWith,swapGroups,swapImpact,IMPACT_ROWS,LOWER_IS_BETTER,'+
   'spellAt,spellCastLevel,spellScale,spellCastChance,spellCastsPerRound,'+
   'spellAlignOk,spellsFor,spellScalingText,spellByNum,'+
-  'bestDrop,dropTooltip,sourceText,monByNum,monLocText,candidatePool,'+
+  'bestDrop,dropTooltip,monByNum,monLocText,candidatePool,'+
   'swingSchedule,MAX_SWINGS,ENERGY_PER_ROUND,setRounds:n=>{fightRounds=n},'+
   'passesRestrictions,isSundry,dropsByMonster,stockByShop,ctxFromChar,itemTags,spellName,'+
-  'sortRows,sourceOrder,sortState,'+
+  'sortRows,sourceOrder,sortState,itemTab,hidesItem,FROM_REF,'+
   'getRounds:()=>fightRounds,damageMargins,DAMAGE_MODELLED,weaponThroughput};', ctx);
 
 const X = ctx.__X;
@@ -667,17 +667,19 @@ ok(/map 15/.test(X.monLocText(hbd.mon)), 'and the tooltip says where that monste
 const hbTip = X.dropTooltip(hb);
 ok(/Devil Fiend Malivek \(10%\)/.test(hbTip), 'the tooltip names the monster and the chance');
 ok(/60,000 exp/.test(hbTip), '...and how hard it is');
-eq(X.sourceText(hb).kind, 'drop', 'an unsold item reports a drop source, not a price');
+ok(!X.bestBuy(hb) && X.bestDrop(hb), 'an unsold item has a drop source and no price');
 // An item you can both buy and kill for leads with the price -- that is the
-// route you control -- but keeps the drop in its tooltip.
+// route you control -- but the drop is shown beside it, not instead of it.
 const dual = item('chainmail hauberk');
 ok(X.bestBuy(dual) && dual.drop && dual.drop.length, 'the chainmail hauberk is both sold and dropped');
-eq(X.sourceText(dual).kind, 'shop', '...and the cheaper certainty, the shop, is what it leads with');
+eq(X.sourceOrder(dual), X.bestBuy(dual).cost,
+   '...and the cheaper certainty, the shop, is what it leads with');
 ok(X.dropTooltip(dual).length > 0, '...while the drop route is still described');
-eq(X.sourceText(item('scroll of blight')).kind, 'shop', 'a sold-only item reports its price');
+ok(X.bestBuy(item('scroll of blight')), 'a sold-only item reports its price');
 // The plain gold ring is not sold anywhere, which is the sort of thing this
 // feature exists to surface.
-eq(X.sourceText(item('gold ring')).kind, 'drop', 'even a basic gold ring is drop-only');
+ok(!X.bestBuy(item('gold ring')) && X.bestDrop(item('gold ring')),
+   'even a basic gold ring is drop-only');
 
 // Location coverage: Rooms.Lair matters, not just Rooms.NPC.
 const located = D.monsters.filter(m => m.maps && m.maps.length).length;
@@ -1001,6 +1003,71 @@ const rarer = twoDrops.reduce((a, b) => (X.bestDrop(b).pct < (a ? X.bestDrop(a).
 ok(X.sourceOrder(likelier) < X.sourceOrder(rarer),
    'and among drops the likelier one comes first',
    `${likelier.name} ${X.bestDrop(likelier).pct}% vs ${rarer.name} ${X.bestDrop(rarer).pct}%`);
+
+/* -------------------------------------------------------- cross-references */
+section('Cross-reference links');
+
+// A link has to know which tab its target is listed on, and the three item tabs
+// partition the table, so this is the same rule isSundry enforces.
+eq(X.itemTab(item('flamberge')), 'weapons', 'a weapon links to the weapons tab');
+eq(X.itemTab(item('padded vest')), 'armour', 'wearable armour links to the armour tab');
+eq(X.itemTab(item('torch')), 'sundry', 'a light source links to the sundry tab');
+const deed = D.items.find(i => i.type === 0 && i.slot == null);
+eq(X.itemTab(deed), 'sundry', 'and so does armour with no wear location', deed.name);
+ok(D.items.every(i => ['weapons', 'armour', 'sundry'].includes(X.itemTab(i))),
+   'every item has a tab to link to');
+
+// Following a link must not land on "nothing matches", so the filters that
+// would hide the target give way -- and only those.
+S.cls = D.classes.find(c => c.name === 'Mage').n;
+S.race = D.races.find(r => r.name === 'Human').n;
+S.level = 20; S.align = '0';
+const plate = D.items.find(i => i.type === 0 && i.atype === 9 && i.inGame && i.slot != null);
+ok(X.hidesItem(plate).usable, 'a link to plate a Mage cannot wear relaxes "usable by me"', plate.name);
+eq(X.hidesItem(plate).ingame, false, '...but leaves "in-game only" alone');
+const staff = D.items.find(i => i.name === 'quarterstaff');
+eq(X.hidesItem(staff).usable, false, 'a link to something they can use relaxes nothing');
+const gone = D.items.find(i => !i.inGame);
+ok(X.hidesItem(gone).ingame, 'and a link to an out-of-game item relaxes "in-game only"', gone.name);
+S.cls = 0;
+eq(X.hidesItem(plate).usable, false, 'with no class set there is no usability filter to relax');
+
+// Items.from is a trail of raw references -- "Item #1727(68.4%), Room 1/2231".
+// The numbered ones are rows we hold, so they become links; the rest stay text.
+const parse = str => { const m = X.FROM_REF.exec(str); return m ? `${m[1].toLowerCase()}|${m[2]}|${m[3] || ''}` : null; };
+eq(parse('Item #1727(68.4%)'), 'item|1727|(68.4%)', 'an item reference parses with its chance');
+eq(parse('Monster #72(1%)'), 'monster|72|(1%)', 'so does a monster reference');
+eq(parse('NPC #13'), 'npc|13|', 'and a bare NPC reference');
+eq(parse('Shop(sell) #146'), 'shop(sell)|146|', 'and a sell-only shop');
+eq(parse('Room 1/2231'), null, 'a room is not a reference to anything we hold');
+eq(parse('Textblock #4104(25%)'), null, 'and neither is a text block');
+
+let itemRefs = 0, monRefs = 0, shopRefs = 0, dangling = 0;
+for (const it of D.items) {
+  for (const part of (it.from || '').split(',').map(x => x.trim()).filter(Boolean)) {
+    const m = X.FROM_REF.exec(part);
+    if (!m) continue;
+    const kind = m[1].toLowerCase(), n = +m[2];
+    if (kind === 'item') { itemRefs++; if (!D.items.some(x => x.n === n)) dangling++; }
+    else if (kind === 'monster' || kind === 'npc') { monRefs++; if (!X.monByNum.has(n)) dangling++; }
+    else { shopRefs++; }
+  }
+}
+ok(itemRefs > 1500, 'the from trails carry item references worth linking', String(itemRefs));
+ok(monRefs > 800, '...and monster references', String(monRefs));
+eq(dangling, 0, 'every item and monster reference names a row we can open');
+// Shop references reach numbers outside the exported shop table; those fall back
+// to plain text rather than a link that goes nowhere.
+const badShops = [];
+for (const it of D.items) {
+  for (const part of (it.from || '').split(',').map(x => x.trim()).filter(Boolean)) {
+    const m = X.FROM_REF.exec(part);
+    if (m && m[1].toLowerCase().startsWith('shop') && !X.shopByNum.has(+m[2])) badShops.push(+m[2]);
+  }
+}
+ok(shopRefs > 1000 && badShops.length > 0,
+   'some shop references point outside the shop table and stay plain text',
+   `${badShops.length} of ${shopRefs}`);
 
 /* ------------------------------------------------------------------ report */
 console.log(`\n${pass} passed, ${fail} failed`);
