@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MajorMUD Gear Optimizer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topline">
+    <div class="brand">
+      <span class="glyph">&#9876;</span>
+      <div>
+        <h1>MajorMUD Gear Optimizer</h1>
+        <p class="sub" id="dbmeta">loading database&hellip;</p>
+      </div>
+    </div>
+    <div class="roster">
+      <label class="ctl-label" for="char-sel">Character</label>
+      <select id="char-sel" title="Switch between saved characters"></select>
+      <button class="btn tiny" id="char-new" title="Start a new, empty character">+ New</button>
+      <button class="btn tiny" id="char-copy" title="Copy this character into a new slot">Duplicate</button>
+      <button class="btn tiny danger" id="char-del" title="Delete this character">Delete</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab is-active" data-tab="character">Character</button>
+    <button class="tab" data-tab="optimize">Optimize</button>
+    <button class="tab" data-tab="browse">Browse Items</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ------------------------------------------------ CHARACTER -->
+<section class="panel is-active" id="tab-character">
+  <div class="split">
+
+    <div class="col">
+      <h2>Paste from the game</h2>
+      <p class="hint">
+        Paste the output of <code>stat</code> and <code>inv</code> &mdash; both at once is fine.
+        Worn gear is read from the <code>(Torso)</code>-style tags in your inventory,
+        untagged entries are treated as carried, and coins come from the
+        <code>Wealth:</code> line. Line wrapping is handled.
+        Pasting <code>inv</code> alone still works: Strength is inferred from your
+        encumbrance, but you will need to set class and level by hand.
+      </p>
+      <textarea id="paste" spellcheck="false" placeholder="Name: Kaltar                Lives/CP: 3/45
+Race: Half-Elf              Exp: 1560234
+Class: Warrior              Level: 24
+Hits: 312/312               Armour Class: 148/6
+
+You are carrying 7 silver nobles, 3 copper farthings, padded vest (Torso),
+padded pants (Legs), cloth shoes (Feet), padded gloves (Hands), skullcap
+(Head), flamberge (Two handed), club, curved bone dagger
+You have no keys.
+Wealth: 73 copper farthings
+Encumbrance: 698/3168 - Light [22%]"></textarea>
+      <div class="row">
+        <button class="btn primary" id="btn-parse">Parse</button>
+        <button class="btn" id="btn-clear">Clear</button>
+        <span class="parse-status" id="parse-status"></span>
+      </div>
+    </div>
+
+    <div class="col">
+      <h2>Character</h2>
+      <label class="wide">Name
+        <input id="f-name" spellcheck="false" placeholder="unnamed" maxlength="40">
+      </label>
+      <div class="grid2">
+        <label>Class<select id="f-class"></select></label>
+        <label>Race<select id="f-race"></select></label>
+        <label>Level<input type="number" id="f-level" min="1" max="100" value="1"></label>
+        <label>Alignment<select id="f-align">
+          <option value="0">Any / unknown</option>
+          <option value="good">Good</option>
+          <option value="neutral">Neutral</option>
+          <option value="evil">Evil</option>
+        </select></label>
+      </div>
+
+      <h3>Base stats <span class="note">(before gear)</span></h3>
+      <div class="grid3 stats">
+        <label>Str<input type="number" id="s-str" value="0"></label>
+        <label>Int<input type="number" id="s-int" value="0"></label>
+        <label>Wil<input type="number" id="s-wil" value="0"></label>
+        <label>Agi<input type="number" id="s-agi" value="0"></label>
+        <label>Hea<input type="number" id="s-hea" value="0"></label>
+        <label>Cha<input type="number" id="s-cha" value="0"></label>
+      </div>
+
+      <h3>Purse</h3>
+      <div class="grid3 stats">
+        <label>Runic<input type="number" id="c-4" value="0" min="0"></label>
+        <label>Plat<input type="number" id="c-3" value="0" min="0"></label>
+        <label>Gold<input type="number" id="c-2" value="0" min="0"></label>
+        <label>Silver<input type="number" id="c-1" value="0" min="0"></label>
+        <label>Copper<input type="number" id="c-0" value="0" min="0"></label>
+      </div>
+      <p class="purse-total" id="purse-total"></p>
+
+      <h3>Currently equipped <span class="note" id="eq-count"></span></h3>
+      <div class="eqlist" id="eqlist"></div>
+
+      <h3>Carried <span class="note" id="carry-count"></span></h3>
+      <div class="eqlist" id="carrylist"></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ------------------------------------------------ OPTIMIZE -->
+<section class="panel" id="tab-optimize">
+
+  <div class="controls">
+    <div class="ctl">
+      <label class="ctl-label">Goal</label>
+      <select id="preset"></select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label">Item pool</label>
+      <select id="pool">
+        <option value="all">Everything in the game</option>
+        <option value="owned">Only what I own</option>
+        <option value="buyable">What I own + can afford in shops</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <label class="ctl-label">Encumbrance target</label>
+      <select id="enctarget">
+        <option value="100">Anything I can carry</option>
+        <option value="33">Stay under 33% (keeps the accy/dodge bonus)</option>
+      </select>
+    </div>
+    <label class="chk"><input type="checkbox" id="opt-limited"> allow limited items</label>
+    <label class="chk"><input type="checkbox" id="opt-cursed"> allow cursed</label>
+    <label class="chk"><input type="checkbox" id="opt-ingame" checked> in-game items only</label>
+    <button class="btn primary" id="btn-opt">Optimize</button>
+  </div>
+
+  <details class="weights" id="shopbox">
+    <summary>Shops to consider &mdash; <span id="shop-summary"></span></summary>
+    <p class="hint">
+      There is no &ldquo;shop level&rdquo; in the game data, so the only honest guide to
+      whether you can <em>reach</em> a shop is where it is. Maps are ordered by how tough
+      the monsters around them are. Turn off the regions you cannot travel to and prices
+      will only be quoted from the shops you leave on.
+    </p>
+    <div class="row">
+      <button class="btn small" id="shop-all">All</button>
+      <button class="btn small" id="shop-none">None</button>
+      <button class="btn small" id="shop-starter">Starter + low only</button>
+    </div>
+    <div id="shop-groups"></div>
+  </details>
+
+  <details class="weights">
+    <summary>Fine-tune weights</summary>
+    <div class="weight-grid" id="weight-grid"></div>
+    <button class="btn small" id="btn-reset-w">Reset to preset</button>
+  </details>
+
+  <div id="opt-warn"></div>
+  <div class="results" id="results"></div>
+</section>
+
+<!-- ------------------------------------------------ BROWSE -->
+<section class="panel" id="tab-browse">
+  <div class="controls">
+    <input type="search" id="q" placeholder="Search item names&hellip;">
+    <select id="q-slot"><option value="">All slots</option></select>
+    <select id="q-sort">
+      <option value="name">Sort: name</option>
+      <option value="ac">Sort: AC</option>
+      <option value="dr">Sort: DR</option>
+      <option value="dmg">Sort: damage</option>
+      <option value="enc">Sort: encumbrance</option>
+      <option value="score">Sort: score for my build</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="q-usable" checked> usable by me</label>
+  </div>
+  <div id="browse"></div>
+</section>
+
+</main>
+
+<footer>
+  <p>
+    Item data parsed from <code id="srcfile">the MegaMUD .mdb</code>.
+    Enum and formula semantics derived from
+    <a href="https://github.com/syntax53/MMUD-Explorer">MMUD&nbsp;Explorer</a>.
+    All numbers are computed locally in your browser.
+  </p>
+</footer>
+
+<script src="data/gamedata.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
