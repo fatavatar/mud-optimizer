@@ -113,7 +113,7 @@ textarea{width:100%;height:290px;resize:vertical;line-height:1.45;font-size:12px
 /* ---------------------------------------------------------- lists */
 .eqlist{
   border:1px solid var(--line);border-radius:5px;
-  background:var(--bg-2);max-height:210px;overflow:auto;
+  background:var(--bg-2);
 }
 .eqlist:empty::after{
   content:"nothing parsed yet";display:block;padding:12px;
@@ -165,7 +165,8 @@ table{width:100%;border-collapse:collapse;font-size:12.5px}
 th{
   text-align:left;font-weight:600;font-size:10.5px;color:var(--ink-faint);
   text-transform:uppercase;letter-spacing:.06em;
-  padding:8px 10px;border-bottom:1px solid var(--line-2);position:sticky;top:0;background:var(--bg);
+  padding:8px 10px;border-bottom:1px solid var(--line-2);background:var(--bg);
+  position:sticky;top:var(--topbar,0px);z-index:5;
 }
 td{padding:8px 10px;border-bottom:1px solid #1e222c;vertical-align:top}
 tbody tr:hover{background:var(--bg-2)}
@@ -186,7 +187,10 @@ tbody tr:hover{background:var(--bg-2)}
 .tag.own{color:var(--blue);border-color:#2c4a6b}
 .bonus{color:var(--ink-dim);font-size:11.5px}
 
-.tablewrap{border:1px solid var(--line);border-radius:6px;overflow:auto;max-height:70vh;background:var(--bg-2)}
+/* No scroll container of its own: the page is the only thing that scrolls, in
+   either direction. An inner scrollport would also break the sticky headings,
+   which stick to whatever scrolls nearest them. */
+.tablewrap{border:1px solid var(--line);border-radius:6px;background:var(--bg-2)}
 .empty{padding:26px;text-align:center;color:var(--ink-faint);font-size:13px}
 .warn{
   background:#2a1f14;border:1px solid #5c4526;color:var(--amber);
@@ -273,7 +277,7 @@ th .arrow{margin-left:5px;font-size:9px;vertical-align:1px}
 }
 .shopgrp summary:hover{color:var(--ink)}
 .shopgrp details[open] summary{color:var(--ink)}
-.shopgrp .tablewrap{max-height:340px;margin:6px 0 4px}
+.shopgrp .tablewrap{margin:6px 0 4px}
 .shopgrp .shophdr strong{font-weight:600}
 .shopgrp .shophdr .tag{margin-left:2px}
 

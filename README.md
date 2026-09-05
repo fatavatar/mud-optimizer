@@ -95,6 +95,17 @@ database unseen. Six tabs open the rest of it up. All of them describe the
 | Monsters | the whole bestiary, 1,101 of them, with what they hit for, where they live, and what they drop |
 | Shops | all 87 shops by region, with their full stock priced at your Charm |
 
+**The page itself says very little.** Status lines are counts and context —
+*166 weapons · Kaltar · level 24 Warrior · Str 66 · Agi 50 · 12% enc* — and the
+reasoning behind every number lives in this README rather than in a paragraph
+above each table. Tooltips are kept where they carry data you cannot see
+otherwise: a drop table, a shop list, a swing schedule, a spell's scaling rule.
+
+**There is one scroll bar.** Tables are not scroll boxes inside a scrolling page;
+the page is the only thing that scrolls, in either direction, and column headings
+stick below the top bar as you go. That is why the top bar's height is measured
+rather than assumed — the tab row wraps at narrow widths.
+
 **Every column of every table sorts.** Click a heading to sort by it, click it
 again to reverse. The arrow marks the column in force, the first click picks the
 useful end (damage descending, names A to Z), and ties fall back to the name —

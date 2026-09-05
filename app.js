@@ -1362,7 +1362,7 @@ function renderEquipped() {
     const it = S.equipped[s.i];
     const r = el('div', 'eqrow');
     const nm = el('span', 'nm');
-    nm.append(xref(it.name, `Open ${it.name} on the ${itemTab(it)} tab.`, () => goToItem(it)));
+    nm.append(xref(it.name, itemTab(it) + ' tab', () => goToItem(it)));
     r.append(nm, el('span', 'loc', s.name));
     box.append(r);
   }
@@ -1377,7 +1377,7 @@ function renderEquipped() {
   for (const it of S.carried) {
     const r = el('div', 'eqrow');
     const nm = el('span', 'nm');
-    nm.append(xref(it.name, `Open ${it.name} on the ${itemTab(it)} tab.`, () => goToItem(it)));
+    nm.append(xref(it.name, itemTab(it) + ' tab', () => goToItem(it)));
     r.append(nm, el('span', 'loc', SLOT.get(it.slot) ? SLOT.get(it.slot).name : D.itemTypes[it.type]));
     cb.append(r);
   }
@@ -1576,8 +1576,7 @@ function renderResults(res) {
     { h: 'Currently', key: r => (r.od ? r.od.name : ''),
       cell: r => {
         const td = el('td', 'cur');
-        if (r.od) td.append(xref(r.od.name, `Open ${r.od.name} on the ${itemTab(r.od)} tab.`,
-          () => goToItem(r.od)));
+        if (r.od) td.append(xref(r.od.name, itemTab(r.od) + ' tab', () => goToItem(r.od)));
         else td.textContent = '—';
         return td;
       } },
@@ -1586,8 +1585,7 @@ function renderResults(res) {
         const td = el('td');
         const nameEl = el('div', 'pick' + (r.changed ? ' changed' : ''));
         if (nw) {
-          nameEl.append(xref(nw.name, shopTooltip(nw) ||        // empty once every stocking shop is off
-            `Open ${nw.name} on the ${itemTab(nw)} tab.`, () => goToItem(nw)));
+          nameEl.append(xref(nw.name, shopTooltip(nw) || itemTab(nw) + ' tab', () => goToItem(nw)));
         } else {
           nameEl.textContent = '— leave empty —';
         }
@@ -1613,16 +1611,13 @@ function renderResults(res) {
         return td;
       } },
     { h: 'Impact of this swap', dir: -1, key: impactDps,
-      title: 'Everything the whole set changes if you make this one swap, including ' +
-             'knock-on effects like encumbrance costing you dodge and crit chance. ' +
-             'Sorts on the damage per round it moves.',
+      title: 'what the whole set changes if you make only this swap',
       cell: r => impactCell(r.sl.i, impacts, leadOf, r.changed) },
     { h: 'Enc', cls: 'num', dir: -1, key: r => (r.nw ? r.nw.enc || 0 : -1),
       cell: r => el('td', 'num', r.nw ? (r.nw.enc || 0).toLocaleString() : '—') },
     { h: 'What it gives', key: r => givesBits(r.nw).join(' · '),
       cell: r => el('td', 'bonus', givesBits(r.nw).join(' · ')) },
     { h: 'Where to get it', key: r => (!r.nw ? Infinity : isOwned(r.nw) ? -1 : sourceOrder(r.nw)),
-      title: 'What you already own first, then what you can buy, then what you have to hunt for.',
       cell: r => {
         const { nw } = r;
         const td = el('td', 'source');
@@ -1637,17 +1632,6 @@ function renderResults(res) {
     tie: (a, b) => a.order - b.order,
   });
 
-  const legend = el('div', 'hint legend');
-  legend.textContent =
-    'Damage is counted round by round over the first ' + fightRounds + ' rounds, because ' +
-    'leftover energy carries between rounds and most fights are short — a weapon worth ' +
-    '"2.5 swings" lands 2, 3, 2, 3, and never more than five in one round. ' +
-    'Impact is measured against the whole recommendation with only that slot put back ' +
-    'the way you wear it now, so it answers "what does changing this one thing buy me". ' +
-    'The column does not add up to the totals above: gear interacts, and weight taken off ' +
-    'one slot pays for itself somewhere else.' +
-    ' Every column here sorts too — by impact, to see which single change is worth the most.';
-  box.append(legend);
 
   const need = D.slots.map(s => res.picks[s.i]).filter(i => i && !isOwned(i));
   const buys = need.filter(i => bestBuy(i));
@@ -1655,18 +1639,17 @@ function renderResults(res) {
     const cost = buys.reduce((a, i) => a + bestBuy(i).cost, 0);
     const have = coinsToCopper(S.coins);
     const note = el('div', 'warn');
-    note.textContent = `${buys.length} recommended item(s) are sold in shops — about ${priceText(cost)} total. ` +
-      (have ? (cost <= have ? `You can afford that (you have ${copperToText(have)}).`
-                            : `You have ${copperToText(have)}, so you are short ${copperToText(cost - have)}.`) : '');
+    note.textContent = `${buys.length} to buy · ${priceText(cost)}` +
+      (have ? (cost <= have ? ` · you have ${copperToText(have)}`
+                            : ` · short ${copperToText(cost - have)}`) : '');
     box.append(note);
   }
 
   const hunt = need.filter(i => !bestBuy(i) && bestDrop(i));
   if (hunt.length) {
     const note = el('div', 'warn');
-    note.textContent = `${hunt.length} recommended item(s) are not sold anywhere and have to be ` +
-      `taken off something: ` +
-      hunt.map(i => { const d = bestDrop(i); return `${i.name} (${d.mon.name}, ${d.pct}%)`; }).join('; ') + '.';
+    note.textContent = `${hunt.length} to hunt · ` +
+      hunt.map(i => { const d = bestDrop(i); return `${i.name} (${d.mon.name}, ${d.pct}%)`; }).join(' · ');
     note.title = hunt.map(i => dropTooltip(i)).join('\n\n');
     box.append(note);
   }
@@ -1674,8 +1657,7 @@ function renderResults(res) {
   const nowhere = need.filter(i => !bestBuy(i) && !bestDrop(i));
   if (nowhere.length) {
     box.append(el('div', 'warn',
-      `${nowhere.length} recommended item(s) have no shop and no drop source in the database: ` +
-      nowhere.map(i => i.name).join(', ') + '. They may be quest or event items.'));
+      `${nowhere.length} with no known source · ` + nowhere.map(i => i.name).join(' · ')));
   }
 }
 
@@ -1788,10 +1770,10 @@ function renderSpells() {
   const at = new Map(list.map(sp => [sp.n, spellAt(sp, level, sc, bonus)]));
 
   note.textContent =
-    `${c.name} draws on ${D.mageryNames[c.magery]} magery, level ${c.mageryLvl}. ` +
-    `${list.length} spell${list.length === 1 ? '' : 's'} shown at caster level ${level}` +
-    (sc ? `, Spellcasting ${sc}` : ', no Spellcasting set — cast chance assumes 100%') +
-    (bonus ? `, +${bonus}% spell damage` : '') + '.' + SORT_HINT;
+    `${list.length} spell${list.length === 1 ? '' : 's'} · ${c.name}, ` +
+    `${D.mageryNames[c.magery]} ${c.mageryLvl} · level ${level}` +
+    (sc ? ` · Spellcasting ${sc}` : '') +
+    (bonus ? ` · +${bonus}% spell dmg` : '');
 
   if (!list.length) { box.append(el('div', 'empty', 'Nothing matches.')); return; }
 
@@ -1823,7 +1805,6 @@ function renderSpells() {
     { h: 'Damage / heal', cls: 'num', dir: -1,
       key: sp => { const a = at.get(sp.n); return a.dmg ? (a.dmg.min + a.dmg.max) / 2 * a.casts
                                                        : a.heal ? (a.heal.min + a.heal.max) / 2 : 0; },
-      title: 'Sorts on the middle of the range, times the casts a round buys.',
       cell: sp => {
         const a = at.get(sp.n);
         const td = el('td');
@@ -1833,7 +1814,7 @@ function renderSpells() {
         return td;
       } },
     { h: 'Per mana', cls: 'num', dir: -1, key: perMana,
-      title: 'Average damage a round divided by what the spell costs to cast.',
+      title: 'damage a round per point of mana',
       cell: sp => {
         const v = perMana(sp);
         const td = el('td', 'num');
@@ -1870,13 +1851,6 @@ function renderSpells() {
     rowClass: sp => (level > 0 && level < sp.req ? 'locked' : ''),
   });
 
-  const legend = el('div', 'hint legend');
-  legend.textContent =
-    'Numbers are for the level in the box, clamped into each spell’s own band: a spell ' +
-    'never scales below its required level, and stops at its cap. Hover a spell name for its ' +
-    'scaling rule, and a cast percentage for how it was worked out. Durations are in rounds. ' +
-    'The +Spell Dmg bonus is applied to damage only — stock MajorMUD does not bonus heals.';
-  box.append(legend);
 }
 
 /* ------------------------------------------------- browsing the database */
@@ -1913,15 +1887,17 @@ function ctxFromChar() {
   return { cls: c, race, str, agi, enc, maxEnc, known: !!c };
 }
 
-/* How the character is described in a tab's note line. */
+/* The status line above a table: what it is showing, and for whom. Facts only --
+ * the reasoning behind the numbers lives in the README, not on the page. */
 function charNote(ctx) {
-  if (!ctx.known) {
-    return 'No class set, so these numbers assume a level 1 body with 50 Strength and ' +
-           '50 Agility. Fill in the Character tab and they become yours.';
+  const bits = [];
+  if (ctx.known) {
+    bits.push(`${S.name || 'unnamed'} · level ${WCTX.level} ${ctx.cls.name}`);
+  } else {
+    bits.push('no character set');
   }
-  return `Quoted for ${S.name || 'your character'} — level ${WCTX.level} ` +
-         `${ctx.cls.name}, Str ${WCTX.str}, Agi ${WCTX.agi}, ` +
-         `${WCTX.encPct}% encumbered in what you are wearing.`;
+  bits.push(`Str ${WCTX.str}`, `Agi ${WCTX.agi}`, `${WCTX.encPct}% enc`);
+  return bits.join(' · ');
 }
 
 /* Items point at spells the Spells tab never lists -- a scroll teaches a quest
@@ -1969,7 +1945,7 @@ function itemNameCell(it, opt) {
   // stock, the recommendation -- it is a way through to the full entry.
   if (opt && opt.link) {
     const line = el('div', 'pick');
-    line.append(xref(it.name, `Open ${it.name} on the ${itemTab(it)} tab.`, () => goToItem(it)));
+    line.append(xref(it.name, itemTab(it) + ' tab', () => goToItem(it)));
     td.append(line);
   } else {
     td.append(el('div', 'pick', it.name));
@@ -1988,7 +1964,7 @@ function itemNameCell(it, opt) {
   const ok = isSundry(it) ? passesRestrictions(it, rules) : isUsable(it, rules);
   if (S.cls && !ok) {
     td.classList.add('locked');
-    td.title = 'Your class, race, level or alignment rules this one out.';
+    td.title = 'not usable by you';
   }
   return td;
 }
@@ -2128,8 +2104,7 @@ function sourceInto(td, it) {
     td.append(a);
     if (buys.length > 1) {
       sep();
-      td.append(xref(`${buys.length} shops`,
-        'Every shop that stocks it, on the Shops tab.', () => goToStockists(it)));
+      td.append(xref(`${buys.length} shops`, 'every shop that stocks it', () => goToStockists(it)));
     }
   }
 
@@ -2142,8 +2117,8 @@ function sourceInto(td, it) {
     td.append(a);
     if (drops.length > 1) {
       sep();
-      td.append(xref(`+${drops.length - 1} more`,
-        'Every monster that drops it, on the Monsters tab.', () => goToDroppers(it)));
+      td.append(xref(`+${drops.length - 1} more`, 'every monster that drops it',
+        () => goToDroppers(it)));
     }
   }
 
@@ -2177,29 +2152,25 @@ function fromRefs(from) {
 
     if (kind === 'item' && byNum.has(num)) {
       const src = byNum.get(num);
-      frag.append(xref(src.name + suffix, `Item #${num} — open it`, () => goToItem(src)));
+      frag.append(xref(src.name + suffix, `item #${num}`, () => goToItem(src)));
       return;
     }
     if ((kind === 'monster' || kind === 'npc') && monByNum.has(num)) {
       const mon = monByNum.get(num);
       frag.append(xref((mon.name || 'monster #' + num) + suffix,
-        `Monster #${num} — open it`, () => goToMonster(mon)));
+        `monster #${num}`, () => goToMonster(mon)));
       return;
     }
     if (kind.startsWith('shop') && shopByNum.has(num)) {
       const sh = shopByNum.get(num);
       const label = (sh.name || 'shop #' + num) + (kind === 'shop(sell)' ? ' (sell only)' : '') + suffix;
-      frag.append(xref(label, `Shop #${num} — open it`, () => goToShop(sh)));
+      frag.append(xref(label, `shop #${num}`, () => goToShop(sh)));
       return;
     }
     frag.append(el('span', 'src none', part));
   });
   return frag;
 }
-
-/* The Sort dropdowns these tabs used to carry are gone -- the headings do that
- * job now -- so each note says so once. */
-const SORT_HINT = ' Click a column heading to sort by it, and again to reverse it.';
 
 /* The tie-break every table falls back on. */
 const tieByName = (a, b) => (a.name || '').localeCompare(b.name || '');
@@ -2291,7 +2262,6 @@ function tableInto(box, cols, list, opt) {
         th.classList.add('sorted');
         th.append(el('span', 'arrow', start.dir < 0 ? '▼' : '▲'));
       }
-      tips.push(isActive ? 'Click to reverse the order.' : 'Click to sort by this column.');
       const go = () => {
         if (i === start.col) start.dir = -start.dir;
         else { start.col = i; start.dir = c.dir || 1; }
@@ -2322,8 +2292,7 @@ function tableInto(box, cols, list, opt) {
   }
   tbl.append(tb); wrap.append(tbl); box.append(wrap);
   if (rows.length > limit) {
-    box.append(el('div', 'empty',
-      `showing the first ${limit} of ${rows.length} — sort or filter to bring others into view`));
+    box.append(el('div', 'empty', `first ${limit} of ${rows.length.toLocaleString()}`));
   }
 }
 
@@ -2347,10 +2316,9 @@ function renderWeapons() {
   const prof = new Map(list.map(i => [i.n, weaponProfile(i)]));
   const p = it => prof.get(it.n);
 
-  $('#w-note').textContent = charNote(ctx) +
-    ` Swings and damage are what the weapon actually lands over ${fightRounds} rounds, ` +
-    'carrying leftover energy from one round into the next — not a continuous rate. ' +
-    `${list.length} weapon${list.length === 1 ? '' : 's'} shown.` + SORT_HINT;
+  $('#w-note').textContent =
+    `${list.length} weapon${list.length === 1 ? '' : 's'} · ${charNote(ctx)} · ` +
+    `${fightRounds}-round fight`;
 
   const box = $('#weapons'); box.innerHTML = '';
   if (!list.length) { box.append(el('div', 'empty', 'No weapons match.')); return; }
@@ -2360,7 +2328,6 @@ function renderWeapons() {
     { h: 'Type', key: it => D.weaponTypes[it.wtype] || '',
       cell: it => el('td', 'slotname', D.weaponTypes[it.wtype] || '—') },
     { h: 'Damage', cls: 'num', dir: -1, key: avgDmg,
-      title: 'Sorts on the middle of the range.',
       cell: it => {
         const td = el('td', 'num', `${it.min}–${it.max}`);
         td.title = `average ${fmt(avgDmg(it))} on a normal hit, ` +
@@ -2369,10 +2336,10 @@ function renderWeapons() {
         return td;
       } },
     { h: 'Speed', cls: 'num', key: it => it.speed || 0,
-      title: 'Lower is faster: it is the energy the weapon costs before your own numbers are applied.',
+      title: 'the weapon\'s own energy, before your numbers',
       cell: it => el('td', 'num', String(it.speed || 0)) },
     { h: 'Energy', cls: 'num', key: it => p(it).energy,
-      title: 'What one swing costs you, out of the 1,000 energy a round hands you.',
+      title: 'energy per swing, of the 1,000 a round gives you',
       cell: it => el('td', 'num', String(Math.round(p(it).energy))) },
     { h: 'Swings', cls: 'num', dir: -1, key: it => p(it).swings,
       cell: it => {
@@ -2389,14 +2356,12 @@ function renderWeapons() {
         const td = el('td', 'num', it.strReq ? String(it.strReq) : '—');
         if ((it.strReq || 0) > WCTX.str) {
           td.classList.add('down');
-          td.title = `${it.strReq - WCTX.str} short. Being under a weapon's Strength ` +
-                     'requirement does not stop you using it — it multiplies your energy ' +
-                     'per swing, so you swing slower. That is already in the numbers here.';
+          td.title = `${it.strReq - WCTX.str} short — costs energy per swing, already counted`;
         }
         return td;
       } },
     { h: 'Where to get it', key: sourceOrder, cell: sourceCell,
-      title: 'Sorts what you can buy first, cheapest first, then what you have to hunt for.' },
+ },
   ], list, { id: 'weapons', sort: 6, redraw: renderWeapons, tie: tieByName,
      rowKey: it => 'item:' + it.n });
 }
@@ -2421,10 +2386,8 @@ function renderArmour() {
   const w = S.weights;
   const c = ctx.cls;
   $('#a-note').textContent =
-    (c ? `${c.name} can wear up to ${D.armourTypes[c.armourType]}. ` : '') +
-    'AC and DR are the real values — both columns are stored ×10 in the database and ' +
-    'divided on export. Score is this item against your own weights from the Optimize tab. ' +
-    `${list.length} piece${list.length === 1 ? '' : 's'} shown.` + SORT_HINT;
+    `${list.length} piece${list.length === 1 ? '' : 's'}` +
+    (c ? ` · ${c.name}, up to ${D.armourTypes[c.armourType]}` : '');
 
   const box = $('#armour'); box.innerHTML = '';
   if (!list.length) { box.append(el('div', 'empty', 'No armour matches.')); return; }
@@ -2435,12 +2398,11 @@ function renderArmour() {
     { h: 'Slot', key: it => SLOT.get(it.slot).name,
       cell: it => el('td', 'slotname', SLOT.get(it.slot).name.replace(/ \d$/, '')) },
     { h: 'Material', key: it => it.atype || 0,
-      title: 'Sorts by weight of material, cloth to full plate.',
       cell: it => {
         const td = el('td', 'slotname', D.armourTypes[it.atype || 0] || '—');
         if (c && c.armourType < (it.atype || 0)) {
           td.classList.add('down');
-          td.title = `Too heavy a material for a ${c.name}, who stops at ${D.armourTypes[c.armourType]}.`;
+          td.title = `${c.name} stops at ${D.armourTypes[c.armourType]}`;
         }
         return td;
       } },
@@ -2451,7 +2413,7 @@ function renderArmour() {
     { h: 'Enc', cls: 'num', key: it => it.enc || 0,
       cell: it => el('td', 'num', (it.enc || 0).toLocaleString()) },
     { h: 'Score', cls: 'num', dir: -1, key: it => scoreItem(it, w),
-      title: 'This piece against your own weights from the Optimize tab.',
+      title: 'against your weights from the Optimize tab',
       cell: it => el('td', 'num', fmt(scoreItem(it, w))) },
     { h: 'Also gives', key: it => effectBits(it, skip).join(' · '),
       cell: it => el('td', 'bonus', effectBits(it, skip).join(' · ')) },
@@ -2478,10 +2440,7 @@ function renderSundry() {
   if ($('#u-usable').checked && S.cls) list = list.filter(i => passesRestrictions(i, opt));
 
   $('#u-note').textContent =
-    'Everything that is neither a weapon nor a wearable piece of armour. None of it is ' +
-    'scored — the optimizer only picks gear you can equip — so this tab is here to look ' +
-    'things up: what a scroll casts, what a key opens, what a shop wants for it. ' +
-    `${list.length} item${list.length === 1 ? '' : 's'} shown.` + SORT_HINT;
+    `${list.length} item${list.length === 1 ? '' : 's'}`;
 
   const box = $('#sundry'); box.innerHTML = '';
   if (!list.length) { box.append(el('div', 'empty', 'Nothing matches.')); return; }
@@ -2497,7 +2456,7 @@ function renderSundry() {
       cell: it => {
         const v = sundryValue(it);
         const td = el('td', 'num', v ? copperToText(v) : 'free');
-        td.title = 'The database value, before any shop markup or your Charm.';
+        td.title = 'before markup and Charm';
         return td;
       } },
     { h: 'Effects', key: it => effectBits(it).join(' · '),
@@ -2524,11 +2483,6 @@ const RACE_STATS = [['int', 'Int'], ['wil', 'Wil'], ['str', 'Str'],
                     ['hea', 'Hea'], ['agi', 'Agi'], ['cha', 'Cha']];
 
 function renderClassRace() {
-  $('#cls-note').textContent =
-    'Hit points per level are rolled between the minimum and maximum. Combat rating drives ' +
-    'how much energy a swing costs, so it is why the same weapon is faster in some hands ' +
-    'than others. Weapons and armour are the ceilings the eligibility rules enforce.' + SORT_HINT;
-
   const spellCount = c => (D.castable[c.n] || []).length;
   const nameCell = x => { const td = el('td'); td.append(el('div', 'pick', x.name)); return td; };
 
@@ -2536,15 +2490,13 @@ function renderClassRace() {
   tableInto(cbox, [
     { h: 'Class', key: c => c.name, cell: nameCell },
     { h: 'Hits/level', cls: 'num', dir: -1, key: c => c.maxHits,
-      title: 'Sorts on the top of the roll.',
       cell: c => el('td', 'num', `${c.minHits}–${c.maxHits}`) },
     { h: 'Combat', cls: 'num', dir: -1, key: c => c.combat,
-      title: 'Drives how much energy a swing costs — higher swings faster.',
+      title: 'higher swings faster',
       cell: c => el('td', 'num', String(c.combat)) },
     { h: 'Weapons', key: c => D.classWeaponNames[c.weaponType] || '',
       cell: c => el('td', null, D.classWeaponNames[c.weaponType] || '—') },
     { h: 'Armour', key: c => c.armourType,
-      title: 'Sorts by how heavy a material the class may wear.',
       cell: c => el('td', null, 'up to ' + (D.armourTypes[c.armourType] || '—')) },
     { h: 'Magery', key: c => (spellCount(c) ? c.magery * 100 + c.mageryLvl : -1),
       cell: c => el('td', null, spellCount(c)
@@ -2564,7 +2516,6 @@ function renderClassRace() {
     { h: 'Race', key: r => r.name, cell: nameCell },
     ...RACE_STATS.map(([k, label]) => ({
       h: label, cls: 'num', dir: -1, key: r => r.max[k],
-      title: 'Sorts on the top of the band — the ceiling is what you can train to.',
       cell: r => {
         const td = el('td', 'num', `${r.min[k]}–${r.max[k]}`);
         if (r.max[k] >= 110) td.classList.add('up');
@@ -2620,10 +2571,7 @@ function renderMonsters() {
 
   const located = list.filter(m => m.maps && m.maps.length).length;
   $('#m-note').textContent =
-    `${list.length} monster${list.length === 1 ? '' : 's'} shown, ${located} of them located. ` +
-    'Whereabouts come from the room table — the monster fixed to a room, plus every lair ' +
-    'list that names it — so a widely-lairing wanderer shows several regions and the rest ' +
-    'say nothing rather than guess. Drop chances are the database’s own percentages.' + SORT_HINT;
+    `${list.length} monster${list.length === 1 ? '' : 's'} · ${located} located`;
 
   const box = $('#monsters'); box.innerHTML = '';
   if (!list.length) { box.append(el('div', 'empty', 'No monsters match.')); return; }
@@ -2661,7 +2609,6 @@ function renderMonsters() {
     { h: 'MR', cls: 'num', dir: -1, key: m => m.mr || 0,
       cell: m => el('td', 'num', m.mr ? String(m.mr) : '—') },
     { h: 'Damage', cls: 'num', dir: -1, key: mid,
-      title: 'Sorts on the middle of the spread, or on the game’s own average for a caster.',
       cell: m => {
         // The spread is its physical swings only. A spell or special attack
         // stores a flat 100 where the minimum should be, so those are counted as
@@ -2674,13 +2621,11 @@ function renderMonsters() {
                      (m.special ? `, plus ${m.special} special attack${m.special === 1 ? '' : 's'}` : '') +
                      (m.avgDmg ? `; the game’s own weighted average is ${m.avgDmg}` : '');
         } else if (m.avgDmg) {
-          td.title = 'It has no ordinary swing — this is the game’s own average damage, ' +
-                     'across attacks whose stored min/max are not damage values.';
+          td.title = 'no ordinary swing — the game’s own average';
         }
         return td;
       } },
     { h: 'Where', dir: -1, key: whereOrder,
-      title: 'Sorts by the toughest region it is found in; unlocated monsters sort last.',
       cell: m => {
         const td = el('td', 'bonus');
         if (!m.maps || !m.maps.length) {
@@ -2693,13 +2638,12 @@ function renderMonsters() {
           if (i) td.append(document.createTextNode(', '));
           const mp = mapByNum.get(n);
           td.append(xref(mp ? `map ${n} (${mp.tier})` : `map ${n}`,
-            'Everything else placed in this region.', () => goToRegion(n)));
+            'monsters here', () => goToRegion(n)));
         });
         if (m.room) td.append(document.createTextNode(' — ' + m.room));
         return td;
       } },
     { h: 'Drops', dir: -1, key: m => loot(m).length,
-      title: 'Sorts by how much it carries.',
       cell: m => {
         const rows = loot(m);
         const td = el('td', 'bonus');
@@ -2711,12 +2655,11 @@ function renderMonsters() {
           const show = all ? rows : rows.slice(0, 3);
           show.forEach((d, i) => {
             if (i) td.append(document.createTextNode(' · '));
-            td.append(xref(`${d.it.name} ${d.pct}%`, 'Open this item.', () => goToItem(d.it)));
+            td.append(xref(`${d.it.name} ${d.pct}%`, itemTab(d.it) + ' tab', () => goToItem(d.it)));
           });
           if (!all && rows.length > 3) {
             td.append(document.createTextNode(' · '));
-            td.append(xref(`+${rows.length - 3} more`, 'List everything it carries.',
-              () => fill(true)));
+            td.append(xref(`+${rows.length - 3} more`, 'everything it carries', () => fill(true)));
           }
         };
         fill(false);
@@ -2777,12 +2720,8 @@ function renderShops() {
   list = list.slice().sort((a, b) => cmp(a, b) || (a.name || '').localeCompare(b.name || ''));
 
   $('#sh-note').textContent =
-    `${list.length} shop${list.length === 1 ? '' : 's'}. Prices are what you would pay: base ` +
-    'value plus the shop’s markup, then scaled by your Charm' +
-    (charm ? ` (${charm}, so ${charm >= 50 ? 'a discount' : 'a surcharge'})` : ' — which is unset, so no adjustment') +
-    '. A shop is placed by region because there is no reachability field in the data; the ' +
-    'Optimize tab is where you switch regions off, and this tab shows what that leaves out.' +
-    ' Open a shop to see its stock, whose columns sort like every other table.';
+    `${list.length} shop${list.length === 1 ? '' : 's'} · ` +
+    (charm ? `prices at Charm ${charm}` : 'Charm unset, list prices');
 
   const box = $('#shops'); box.innerHTML = '';
   if (!list.length) { box.append(el('div', 'empty', 'No shops match.')); return; }
@@ -2802,10 +2741,7 @@ function renderShops() {
       hdr.append(tier);
     }
     if (!enabledShops.has(sh.n)) {
-      const off = el('span', 'tag lim', 'off in the optimizer');
-      off.title = 'Turned off under “Shops to consider” on the Optimize tab, so its prices ' +
-                  'are not quoted there.';
-      hdr.append(off);
+      hdr.append(el('span', 'tag lim', 'off in the optimizer'));
     }
     if (sh.classRest) hdr.append(el('span', 'tag own', listOfClasses([sh.classRest]) + ' only'));
     const meta = [];
@@ -2834,8 +2770,7 @@ function renderShops() {
           { h: 'Item', key: r => r.it.name, cell: r => itemNameCell(r.it, { link: true }) },
           { h: 'Kind', key: r => kindOf(r.it), cell: r => el('td', 'slotname', kindOf(r.it)) },
           { h: 'Price here', cls: 'num', key: r => buyCost(r.it, sh.markup, charm),
-            title: 'Base value plus this shop’s markup, scaled by your Charm.',
-            cell: r => el('td', 'num', priceText(buyCost(r.it, sh.markup, charm))) },
+                  cell: r => el('td', 'num', priceText(buyCost(r.it, sh.markup, charm))) },
           { h: 'In stock', cls: 'num', dir: -1, key: r => r.max,
             cell: r => el('td', 'num', String(r.max)) },
           { h: 'Enc', cls: 'num', key: r => r.it.enc || 0,
@@ -2888,12 +2823,12 @@ function runOptimize() {
   syncStateFromForm();
   const warn = $('#opt-warn'); warn.innerHTML = '';
   if (!S.cls) {
-    warn.append(el('div', 'warn', 'Pick a class first — class decides which armour and weapons you can even wear.'));
+    warn.append(el('div', 'warn', 'Pick a class first.'));
     renderResults(null); return;
   }
   const msgs = [];
-  if (S.align === '0') msgs.push('Alignment is unset, so good/evil-restricted items are all being allowed.');
-  if (!S.base.str) msgs.push('Strength is 0, so the encumbrance budget is 0 — set your stats for a usable result.');
+  if (S.align === '0') msgs.push('Alignment unset — restricted items allowed.');
+  if (!S.base.str) msgs.push('Strength 0 — no encumbrance budget.');
   if (msgs.length) warn.append(el('div', 'warn', msgs.join(' ')));
 
   const opt = {
@@ -2908,8 +2843,22 @@ function runOptimize() {
   renderResults(S.result);
 }
 
+/* The top bar is sticky, so a table's headings have to stop below it rather than
+ * slide under it. Its height moves with the window -- the tab row wraps -- so it
+ * is measured rather than guessed. */
+function trackTopbar() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return;
+  const set = () => document.documentElement.style
+    .setProperty('--topbar', (bar.offsetHeight || 0) + 'px');
+  set();
+  if (typeof ResizeObserver === 'function') new ResizeObserver(set).observe(bar);
+  else window.addEventListener('resize', set);
+}
+
 function init() {
   initForm();
+  trackTopbar();
   renderShopFilter();
   loadRoster();
   showActiveChar();

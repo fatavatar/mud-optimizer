@@ -46,14 +46,6 @@
 
     <div class="col">
       <h2>Paste from the game</h2>
-      <p class="hint">
-        Paste the output of <code>stat</code> and <code>inv</code> &mdash; both at once is fine.
-        Worn gear is read from the <code>(Torso)</code>-style tags in your inventory,
-        untagged entries are treated as carried, and coins come from the
-        <code>Wealth:</code> line. Line wrapping is handled.
-        Pasting <code>inv</code> alone still works: Strength is inferred from your
-        encumbrance, but you will need to set class and level by hand.
-      </p>
       <textarea id="paste" spellcheck="false" placeholder="Name: Kaltar                Lives/CP: 3/45
 Race: Half-Elf              Exp: 1560234
 Class: Warrior              Level: 24
@@ -160,12 +152,6 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
 
   <details class="weights" id="shopbox">
     <summary>Shops to consider &mdash; <span id="shop-summary"></span></summary>
-    <p class="hint">
-      There is no &ldquo;shop level&rdquo; in the game data, so the only honest guide to
-      whether you can <em>reach</em> a shop is where it is. Maps are ordered by how tough
-      the monsters around them are. Turn off the regions you cannot travel to and prices
-      will only be quoted from the shops you leave on.
-    </p>
     <div class="row">
       <button class="btn small" id="shop-all">All</button>
       <button class="btn small" id="shop-none">None</button>
@@ -176,14 +162,6 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
 
   <details class="weights">
     <summary>Fine-tune weights</summary>
-    <p class="hint">
-      <strong>Crits</strong> and <strong>Max Dmg</strong> read 0 on purpose. Whenever your
-      character is swinging a weapon they are priced through <em>Weapon damage</em> — a crit
-      point is worth whatever it actually adds to damage per round, which depends on your
-      weapon, your swing count and how far past the 40-crit threshold you already are.
-      Giving them a weight here as well would pay for the same point twice. They still apply
-      on their own if there is no weapon to price them against.
-    </p>
     <div class="weight-grid" id="weight-grid"></div>
     <button class="btn small" id="btn-reset-w">Reset to preset</button>
   </details>
@@ -294,15 +272,9 @@ Encumbrance: 698/3168 - Light [22%]"></textarea>
 <!-- ------------------------------------------------ CLASSES &amp; RACES -->
 <section class="panel" id="tab-classes">
   <h2>Classes</h2>
-  <p class="hint" id="cls-note"></p>
   <div id="classlist"></div>
 
   <h2>Races</h2>
-  <p class="hint">
-    Stat ranges are the minimum and maximum a character of that race can roll.
-    Innate bonuses are what the race grants on top, before any gear.
-    Click a column heading to sort by it, and again to reverse it.
-  </p>
   <div id="racelist"></div>
 </section>
 
