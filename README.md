@@ -181,6 +181,13 @@ again. Every exit is also listed in the room panel with whatever the
 database says about it: *(Door)*, *(Key: 1416 [or 101 picklocks])*, *(Trap, 40
 damage)*, *(Hidden/Searchable)*, *(Toll: 500)*, *(Level: 0 to 3)*.
 
+**A label is only drawn where it fits.** A name on every area is a wall of
+overlapping text as soon as you pull back, so an area is named only when the
+name fits inside the part of it you can see, and a room only when its cell is
+big enough to read; anything that would land on something already written is
+dropped. Zoomed out you get no labels at all, which is the point — the shapes
+are the information at that distance, and the area picker names them.
+
 Hovering a room says what is in it, which is the question worth asking: the shop
 standing there, the monster fixed to it, everything that lairs in it, items left
 on the floor, whether it is dark enough to need a light, and **what you can type

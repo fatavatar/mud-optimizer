@@ -31,7 +31,8 @@ vm.runInContext(
   'swingSchedule,MAX_SWINGS,ENERGY_PER_ROUND,setRounds:n=>{fightRounds=n},'+
   'passesRestrictions,isSundry,dropsByMonster,stockByShop,ctxFromChar,itemTags,spellName,'+
   'sortRows,sourceOrder,sortState,itemTab,hidesItem,FROM_REF,'+
-  'getRounds:()=>fightRounds,damageMargins,DAMAGE_MODELLED,weaponThroughput};', ctx);
+  'getRounds:()=>fightRounds,damageMargins,DAMAGE_MODELLED,weaponThroughput,' +
+  'MV,drawMap,indexMap};', ctx);
 
 const X = ctx.__X;
 const D = ctx.window.GAMEDATA;
@@ -1147,6 +1148,59 @@ ok(stretched > 0, 'loops a grid cannot close are kept as stretched lines, not dr
 const anchored = exactNeighbour.reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
 eq(anchored[0], anchored[1],
    'and every room sharing an area sits exactly where a neighbour puts it');
+
+// Labels: a name on every area is a wall of overlapping text at any distance,
+// so one is drawn only where it fits the ground it names and nothing else has
+// been written. Drive the real canvas code with a stub context and check that
+// no two labels ever share a pixel -- and that zoomed out there are none.
+{
+  const drawn = [];
+  const state = { font: '11px x', textAlign: 'left' };
+  const stub = {
+    canvas: {}, setTransform() {},
+    measureText: t => ({ width: t.length * (parseInt(state.font) || 11) * 0.6 }),
+    fillText(t, x, y) { drawn.push([t, x, y, parseInt(state.font) || 11, state.textAlign]); },
+  };
+  const noop = new Proxy(stub, {
+    get: (t, k) => (k in t ? t[k] : (k in state ? state[k] : () => {})),
+    set: (t, k, v) => { state[k] = v; return true; },
+  });
+  ctx.document.querySelector = sel => (sel === '#mp-labels' ? { checked: true } : null);
+  ctx.document.documentElement = {};
+  ctx.getComputedStyle = () => ({ getPropertyValue: () => '' });
+  const MV = X.MV;
+  X.indexMap(MAPS[1]);
+  MV.ctx = noop; MV.vw = 1200; MV.vh = 700;
+  const town = MAPS[1].rooms.find(r => r[R_NUM] === 1);   // the Town Gates
+  const counts = [];
+  let clashes = 0;
+  for (const scale of [3, 5, 8, 12, 18, 26, 40, 64]) {
+    MV.scale = scale;
+    MV.ox = town[R_X] - MV.vw / (2 * scale);
+    MV.oy = town[R_Y] - MV.vh / (2 * scale);
+    drawn.length = 0;
+    X.drawMap();
+    // the same boxes drawLabels claims, rebuilt from what it actually wrote
+    const boxes = drawn.map(([t, x, y, size, align]) => {
+      const w = t.length * size * 0.6;
+      return align === 'center' ? [x - w / 2 - 3, y - size, x + w / 2 + 3, y + 3]
+                                : [x - 2, y - 13, x + 4 + w, y + 3];
+    });
+    for (let i = 0; i < boxes.length; i++)
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j];
+        if (a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]) clashes++;
+      }
+    counts.push([scale, drawn.length]);
+  }
+  eq(clashes, 0, 'no two map labels are ever drawn over each other');
+  const zoomedOut = counts.filter(c => c[0] <= 5).reduce((a, c) => a + c[1], 0);
+  eq(zoomedOut, 0, 'and zoomed out there are none at all, where they used to pile up');
+  const close = counts.find(c => c[0] === 40)[1];
+  ok(close > 20, 'but zoomed in the rooms are named', `${close} labels at 40px a cell`);
+  ctx.document.querySelector = () => null;
+  MV.ctx = null; MV.data = null;
+}
 
 // The bug this layout exists to fix: places drawn on top of each other. Map 1's
 // biggest area used to hold the forest, the labyrinth, the graveyard and the

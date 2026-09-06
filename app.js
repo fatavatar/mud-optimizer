@@ -2996,7 +2996,7 @@ function drawMap() {
   const y0 = MV.oy - pad, y1 = MV.oy + MV.vh / s + pad;
   const inView = r => r[R_X] >= x0 && r[R_X] <= x1 && r[R_Y] >= y0 && r[R_Y] <= y1;
 
-  // area outlines, and their names while the rooms are too small to read
+  // area outlines; the names come last, once it is clear there is room
   ctx.lineWidth = 1;
   for (const a of m.areas) {
     const ax = sx(a.x - 0.6), ay = sy(a.y - 0.6);
@@ -3004,11 +3004,6 @@ function drawMap() {
     if (ax > MV.vw || ay > MV.vh || ax + aw < 0 || ay + ah < 0) continue;
     ctx.strokeStyle = p.line;
     ctx.strokeRect(ax, ay, aw, ah);
-    if (s < 9) {
-      ctx.fillStyle = p.faint;
-      ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText(`${a.label} (${a.rooms})`, ax + 4, ay + 13);
-    }
   }
 
   // Exits first, so rooms sit on top of them -- but only the ones that are a
@@ -3089,16 +3084,63 @@ function drawMap() {
     ctx.strokeRect(sx(r[R_X] + 0.5) - half - 2, sy(r[R_Y] + 0.5) - half - 2, box + 4, box + 4);
   }
 
-  // names, once there is room for them
+  drawLabels(p, s, half, inView);
+}
+
+/* Labels are what turn a map to mush: a name on every area, or on every room,
+ * and at any distance they are drawn through each other. So a label goes down
+ * only when it fits inside the thing it names and lands where nothing has been
+ * written yet -- which means you see names once you are close enough to read
+ * them, and nothing before that. */
+function claimant() {
+  const taken = [];
+  return (x0, y0, x1, y1) => {
+    if (x1 < 0 || x0 > MV.vw || y1 < 0 || y0 > MV.vh) return false;
+    for (const t of taken)
+      if (x0 < t[2] && x1 > t[0] && y0 < t[3] && y1 > t[1]) return false;
+    taken.push([x0, y0, x1, y1]);
+    return true;
+  };
+}
+
+function drawLabels(p, s, half, inView) {
+  const ctx = MV.ctx, m = MV.data;
+  const free = claimant();
+
+  // An area is named along the top of whatever part of it is on screen, so the
+  // name stays with you while you pan around inside one.
+  if (s >= 8) {
+    ctx.fillStyle = p.faint;
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    for (const a of m.areas) {
+      const x0 = Math.max(sx(a.x - 0.6), 0), x1 = Math.min(sx(a.x - 0.6) + (a.w + 1.2) * s, MV.vw);
+      const y0 = Math.max(sy(a.y - 0.6), 0), y1 = Math.min(sy(a.y - 0.6) + (a.h + 1.2) * s, MV.vh);
+      if (y1 - y0 < 20) continue;
+      const text = `${a.label} (${a.rooms})`;
+      const w = ctx.measureText(text).width;
+      if (w + 8 > x1 - x0) continue;          // it does not fit the ground it names
+      if (!free(x0 + 3, y0 + 1, x0 + 9 + w, y0 + 17)) continue;
+      ctx.fillText(text, x0 + 5, y0 + 14);
+    }
+  }
+
+  // Room names, once a cell is big enough to read and the name has somewhere to
+  // go. Most rooms in a street are called the same thing, so dropping the ones
+  // that collide loses less than it looks.
   if (s >= 26 && $('#mp-labels').checked) {
+    const size = Math.min(13, Math.round(s / 2.4));
     ctx.fillStyle = p.ink;
-    ctx.font = `${Math.min(13, Math.round(s / 2.4))}px ui-monospace, monospace`;
+    ctx.font = `${size}px ui-monospace, monospace`;
     ctx.textAlign = 'center';
     for (const r of m.rooms) {
       if (!inView(r)) continue;
       const full = roomName(r);
-      const short = full.includes(',') ? full.slice(full.indexOf(',') + 1).trim() : full;
-      ctx.fillText(short.slice(0, 18), sx(r[R_X] + 0.5), sy(r[R_Y] + 0.5) + half + 12);
+      const short = (full.includes(',') ? full.slice(full.indexOf(',') + 1).trim() : full).slice(0, 18);
+      const w = ctx.measureText(short).width;
+      const cx = sx(r[R_X] + 0.5), cy = sy(r[R_Y] + 0.5) + half + size;
+      if (!free(cx - w / 2 - 3, cy - size, cx + w / 2 + 3, cy + 3)) continue;
+      ctx.fillText(short, cx, cy);
     }
     ctx.textAlign = 'left';
   }
