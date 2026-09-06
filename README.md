@@ -93,7 +93,7 @@ database unseen. Six tabs open the rest of it up. All of them describe the
 | Armour | 494 wearable pieces, AC and DR unscaled, sorted by your own weights if you like |
 | Sundry | the other 1,073 rows — scrolls, keys, potions, light, containers, scenery, and the handful of "armour" you cannot actually wear |
 | Classes & Races | hits per level, combat rating, weapon and armour ceilings, magery and spell count; race stat bands and innate abilities |
-| Monsters | the whole bestiary, 1,101 of them, with what they hit for, where they live, and what they drop |
+| Monsters | the whole bestiary, 1,101 of them, with what they hit for, where they live, what they drop — and whether you can kill them |
 | Shops | all 87 shops by region, with their full stock priced at your Charm |
 
 **The page itself says very little.** Status lines are counts and context —
@@ -349,6 +349,7 @@ hellblade    18-40 dmg   limited 1 · lvl 50+ · evil only
 
   Dropped by 1 monster:
   - Devil Fiend Malivek (10%), 60,000 exp, 4,500 hp
+      you cannot kill it
       map 15 (extreme) — Diamond Mine Tunnel
 ```
 
@@ -361,6 +362,25 @@ the route you control — and names the best drop otherwise. An item that is bot
 sold and dropped keeps both in its tooltip. Where several monsters drop the same
 thing, the one named is the best chance, and among equal chances the weakest
 monster carrying it.
+
+**Every drop is priced as a fight**, because a drop chance is only half the
+answer — the other half is whether you can take the thing carrying it:
+
+```
+belt of might     1 runic, 12 plat, 50 gold · cyclops 2% · 6% kill
+white gold ring   massive cocoon 2% · 100% kill
+katana            master assassin 2% · 82% kill
+```
+
+and where the likeliest drop is not the fight to pick, the alternative comes with
+it:
+
+```
+piece of black chitin   mermex queen 100% · 20% kill · mermex worker 10% · 100% kill
+```
+
+That last column is the whole point of the fight model below.
+
 
 The **What I own + shops + monster drops** item pool adds anything with a drop
 source to the search. Your purse does not gate those, because there is no price
@@ -381,6 +401,60 @@ Two things about the location data:
 
 A `0%` drop row is treated as no source at all — the monster is listed but never
 actually drops it.
+
+### Can I kill it?
+
+The optimizer scores gear in the abstract: it never asks what you are swinging
+at. That is the right answer for *which sword is better* and useless for the
+question you actually have when a table says a helm drops off something.
+
+So the whole monster row is exported now, not the handful of columns a bestiary
+needs — damage resistance, the accuracy and energy cost of each of its five
+possible attacks, how much energy it has in a round, the spells it throws between
+swings, its alignment, what it regenerates, what it carries in coin. Then the
+Monsters tab answers, for the active character:
+
+| | |
+| --- | --- |
+| **You hit** | how many swings get past its armour class, then its dodge, and what that comes to per round after its damage resistance |
+| **Win** | the odds, with rounds to kill it against rounds for it to kill you |
+
+Both columns sort, so the bestiary sorts by *what can I take*.
+
+The formulas are ported from MMUD Explorer, stock MajorMUD branches throughout:
+`CalculateAttackDefense` for the armour check — the miss rate is
+`(AC × AC) / 100` over `(Accy × Accy) / 140`, floored at 8% and capped at 99% —
+`CalcDodgeVSAccuracy`, `CalculateAttack`'s damage block (flat damage resistance
+comes off the ordinary hit and the crit alike), `CalculateResistDamage`, and
+`CalcCombatRounds`, whose odds are `RTD² / (RTK² + RTD²)`.
+
+What the monster does back comes out of its attack rows. Its energy divided by an
+attack's cost is how often that attack comes round: an orc captain has 1,000
+energy and a 260-energy swing, so it swings 3.85 times a round, which is exactly
+how the table's own damage average of 54 falls out of an 8–16 hit.
+
+**That last sentence is the test.** Rebuilding each monster's damage per round
+from its raw attack rows and comparing against the `AvgDmg` the database states
+for itself is a real check on both the export and the model — nothing links the
+two. Over the 608 monsters whose attacks are all physical:
+
+| | |
+| --- | --- |
+| Within 10% of the table's own average | **95.7%** |
+| Mean error | 3.0% |
+
+Where they disagree the model is usually the higher of the two, which is the safe
+side of a question about whether you will survive.
+
+Two things it does not do. **A `stat` paste wins over anything derived**: the
+game's own Hits, Armour Class and MagicRes already know about the spells you have
+up and the levelling rolls we can only average, so they are used when you have
+pasted them and only derived (`CalcMaxHP`, `CalcMR`) when you have not. And
+**spells thrown on a hit are priced off the table rather than modelled** — an
+attack row carries a spell number and no damage, and monster spell damage is not
+in the export yet, so the shortfall against the monster's own average is
+attributed to them, gated on the attack landing and answered by magic resistance.
+Without that a fire bat reads as half the threat it is.
 
 ### The spell calculator
 

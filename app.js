@@ -15,6 +15,7 @@ const S = {
   sc: 0,               // Spellcasting, straight off the stat block if pasted
   base: { str: 0, int: 0, wil: 0, agi: 0, hea: 0, cha: 0 },
   coins: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 },
+  stat: {},            // ac / dr / hp / mana / mr straight off a `stat` paste
   equipped: {},        // slot index -> item
   carried: [],         // items
   unmatched: [],       // names we could not resolve
@@ -73,7 +74,7 @@ function blankState() {
     name: '', cls: 0, race: 0, level: 1, align: '0', sc: 0,
     base: { str: 0, int: 0, wil: 0, agi: 0, hea: 0, cha: 0 },
     coins: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 },
-    equipped: {}, carried: [], unmatched: [], parsedEnc: null,
+    equipped: {}, carried: [], unmatched: [], parsedEnc: null, stat: {},
     preset: 'Balanced', weights: { ...PRESETS['Balanced'] }, paste: '',
   };
 }
@@ -90,6 +91,7 @@ function snapshot() {
     carried: S.carried.map(i => i.n),
     unmatched: [...S.unmatched],
     parsedEnc: S.parsedEnc ? [...S.parsedEnc] : null,
+    stat: { ...(S.stat || {}) },
     preset: S.preset, weights: { ...S.weights }, paste: S.paste,
   };
 }
@@ -110,6 +112,7 @@ function restore(snap) {
   S.carried = (s.carried || []).map(n => byNum.get(n)).filter(Boolean);
   S.unmatched = [...(s.unmatched || [])];
   S.parsedEnc = s.parsedEnc ? [...s.parsedEnc] : null;
+  S.stat = { ...(s.stat || {}) };
   S.preset = PRESETS[s.preset] ? s.preset : 'Balanced';
   S.weights = { ...(s.weights || PRESETS[S.preset]) };
   S.paste = s.paste || '';
@@ -406,7 +409,7 @@ function weaponProfile(it) {
   const swings = schedule.reduce((a, b) => a + b, 0);
   const fightDamage = swings * perSwing;
 
-  return { energy, qnd, critPct, normal, crit, perSwing,
+  return { energy, qnd, critPct, minD, maxD, normal, crit, perSwing,
            schedule, swings, fightDamage,
            perRound: fightDamage / fightRounds,
            // The continuous rate MME reports, kept for comparison. It is what
@@ -416,6 +419,208 @@ function weaponProfile(it) {
 }
 
 function weaponThroughput(it) { return weaponProfile(it).perRound; }
+
+/* ------------------------------------------------------- fighting a monster
+ *
+ * The optimizer scores gear in the abstract: it never asks what you are
+ * swinging at. That is fine for "which sword is better" and useless for the
+ * question you actually have when a table says a helm drops off something --
+ * can I kill that?
+ *
+ * Ported from MMUD Explorer, the stock MajorMUD branch throughout:
+ * modMMudFunc.CalculateAttackDefense (the armour-class check),
+ * CalcDodgeVSAccuracy, CalculateAttack's damage block (flat damage resistance
+ * comes off the ordinary hit and the crit alike), CalculateResistDamage,
+ * CalcCombatRounds (rounds to kill, rounds to die, and the odds out of them)
+ * and clsMonsterAttackSim's attack loop for what the monster does back. */
+
+const HIT_MIN = 8, HIT_CAP = 99, DODGE_CAP = 95;
+const MOB_REGEN_ROUNDS = 18;        // modMMudFunc.STOCK_MOB_HPREGEN_ROUNDS
+const A_DODGE = 34;                 // the Dodge ability, for monsters that have it
+
+/* CalculateAttackDefense: the miss rate is (AC*AC)/100 over (Accy*Accy)/140,
+ * and a swing lands between 8% and 99% of the time however lopsided that is. */
+function hitPct(accy, ac) {
+  if (ac <= 0) return HIT_CAP;
+  const acc = Math.max(1, Math.min(9999, accy));
+  const def = Math.min(9999, ac);
+  const t = Math.max(1, Math.trunc((acc * acc) / 140));
+  return Math.max(HIT_MIN, Math.min(HIT_CAP, 100 - Math.trunc((def * def) / t)));
+}
+
+/* CalcDodgeVSAccuracy, stock: (dodge * 10) \ (accy \ 8), capped at 95. */
+function dodgePct(dodge, accy) {
+  if (dodge <= 0 || accy <= 8) return 0;
+  const t = Math.max(1, Math.trunc(Math.min(9999, accy) / 8));
+  return Math.max(0, Math.min(DODGE_CAP, Math.trunc((Math.min(9999, dodge) * 10) / t)));
+}
+
+/* The share of swings that land: past the armour, then past the dodge. */
+const landsVs = (accy, ac, dodge) =>
+  (hitPct(accy, ac) / 100) * (1 - dodgePct(dodge, accy) / 100);
+
+/* CalculateResistDamage for an ordinary damage spell: magic resistance over 51
+ * cuts it, under 50 makes it worse. */
+function resistDamage(dmg, mr) {
+  const m = mr > 0 ? mr : 1;
+  const cut = m > 51 ? Math.min(50, Math.trunc((m - 50) / 2)) : 0;
+  if (cut > 0) return dmg * (1 - cut / 100);
+  if (m < 50) return dmg + (dmg * (50 - m)) / 100;
+  return dmg;
+}
+
+const calcMR = (int_, wil, mod) => Math.trunc((int_ + wil * 3) / 4) + (mod || 0);
+
+/* CalcMaxHP. The roll is cumulative: level 1 hands you your class's whole
+ * range and every train adds 0 to it again, so the average at level L is
+ * range + (L-1) * range/2. */
+const calcMaxHP = (roll, level, hea, perLevel) =>
+  Math.trunc(hea / 2) + level * perLevel + Math.trunc(((hea - 50) * level) / 16) + roll;
+
+/* Everything about the character a fight needs. What the game itself reported
+ * in a `stat` paste wins over anything derived from what is worn -- it already
+ * knows about the spells up, the buffs and the levelling rolls we can only
+ * average. */
+function fighterFromChar() {
+  const c = clsByNum.get(S.cls);
+  const race = D.races.find(r => r.n === S.race);
+  const innate = {
+    crit: (c ? sumAbil(c.abils, 58) : 0) + (race ? sumAbil(race.abils, 58) : 0),
+    maxDmg: (c ? sumAbil(c.abils, 4) : 0) + (race ? sumAbil(race.abils, 4) : 0),
+  };
+  const p = profileOf(S.equipped, innate);
+  const st = S.stat || {};
+  const level = Math.max(1, S.level || 1);
+  const hea = (S.base.hea || 0) + (p.hea || 0);
+  const range = c ? c.maxHits : 0;
+  const perLevel = (c ? c.minHits : 0) + (race ? race.hpPerLvl : 0);
+  const rolled = range ? range + ((level - 1) * range) / 2 : 0;
+  const derivedHP = Math.round(calcMaxHP(rolled, level, hea, perLevel) + (p.hp || 0));
+
+  return {
+    known: !!c && !!p.weapon,
+    weapon: p.weapon || null,
+    accy: p.accyTotal, dodge: p.dodgeTotal,
+    ac: st.ac != null ? st.ac : (p.ac || 0),
+    dr: st.dr != null ? st.dr : (p.dr || 0),
+    mr: st.mr != null ? st.mr : calcMR((S.base.int || 0) + (p.int || 0),
+                                       (S.base.wil || 0) + (p.wil || 0), p.mr || 0),
+    hp: Math.max(1, st.hp != null ? st.hp : derivedHP),
+    fromPaste: st.hp != null,
+  };
+}
+
+const monDodge = m => sumAbil(m.abils, A_DODGE);
+
+/* What the character does to one monster in a round. */
+function damageVs(f, m) {
+  const w = f.weapon;
+  if (!w) return { hit: 0, lands: 0, perRound: 0 };
+  const dr = m.dr || 0;
+  const lo = Math.max(0, w.minD - dr), hi = Math.max(0, w.maxD - dr);
+  const crit = Math.max(0, w.crit - dr);        // 3x max damage, then the flat cut
+  const p = w.critPct / 100;
+  const perSwing = (1 - p) * ((lo + hi) / 2) + p * crit;
+  const lands = landsVs(f.accy, m.ac || 0, monDodge(m));
+  return { hit: hitPct(f.accy, m.ac || 0), dodged: dodgePct(monDodge(m), f.accy),
+           lands, perRound: perSwing * (w.swings / fightRounds) * lands };
+}
+
+/* What it does back. Its energy over an attack's cost is how often that attack
+ * comes round -- an orc captain has 1,000 energy and a 260-energy swing, which
+ * is exactly how the table's own average of 54 falls out of an 8-16 hit. */
+function intakeFrom(f, m) {
+  const atts = (m.att || []).filter(a => a[2] > 0);
+  if (!atts.length) return { perRound: m.avgDmg || 0, attacks: 0, modelled: false, proc: 0 };
+  const pool = m.energy || 1000;
+  let cost = 0, dmg = 0, raw = 0, land = 0, procs = false;
+  for (const [type, acc, pct, lo, hi, ecost, , hitSpell] of atts) {
+    const share = pct / 100;
+    cost += share * (ecost || pool);
+    const mid = (lo + hi) / 2;
+    raw += share * mid;
+    const lands = landsVs(acc, f.ac, f.dodge);
+    land += share * lands;
+    // A spell goes past armour and dodge; magic resistance is what answers it.
+    dmg += share * (type === 2 ? resistDamage(mid, f.mr)
+                               : Math.max(0, mid - f.dr) * lands);
+    if (hitSpell) procs = true;
+  }
+  const attacks = Math.min(6, cost > 0 ? pool / cost : 1);
+
+  // Some attacks throw a spell when they land. The attack row carries only the
+  // spell's number, and the damage of a monster spell is not in the export, so
+  // there is nothing to add up -- but the table's own AvgDmg already counts it.
+  // The shortfall against that average is what the spell is worth: it is added
+  // back, gated on the attack landing and answered by magic resistance rather
+  // than by armour. Without this a fire bat reads as half the threat it is.
+  let proc = 0;
+  if (procs && m.avgDmg > attacks * raw) {
+    proc = resistDamage(m.avgDmg - attacks * raw, f.mr) * land;
+  }
+  return { perRound: attacks * dmg + proc, attacks, modelled: true, proc };
+}
+
+/* CalcCombatRounds. Rounds to kill it, rounds for it to kill you, and the odds
+ * MME reads out of the two: RTD^2 / (RTK^2 + RTD^2). */
+function fightVs(f, m) {
+  const out = damageVs(f, m);
+  const inc = intakeFrom(f, m);
+  const hp = m.hp || 0;
+  let rtk = 0;
+  if (out.perRound > 0 && hp > 1) {
+    rtk = Math.ceil((hp / out.perRound) * 2) / 2;          // up to the half round
+    if (m.regen > 0 && rtk >= MOB_REGEN_ROUNDS * 0.9) {
+      let n = 1;
+      while ((rtk - n * MOB_REGEN_ROUNDS) / MOB_REGEN_ROUNDS >= 0.9) n++;
+      rtk = Math.round(((hp + n * m.regen) / out.perRound) * 100) / 100;
+    }
+    if (rtk < 1) rtk = 1;
+  }
+  const rtd = inc.perRound > 0 ? f.hp / inc.perRound : 0;
+  const endless = !rtk || rtk > 200;
+  let win = null;
+  if (endless) win = 0;
+  else if (rtd <= 0) win = 100;                            // it cannot hurt you
+  else win = Math.round((rtd * rtd) / (rtk * rtk + rtd * rtd) * 100);
+  return { ...out, incoming: inc.perRound, attacks: inc.attacks, proc: inc.proc,
+           modelled: inc.modelled, rtk, rtd, win, endless };
+}
+
+const round1 = n => Math.round(n * 10) / 10;
+const winClass = w => (w >= 70 ? 'win-good' : w >= 35 ? 'win-even' : 'win-bad');
+
+/* The whole calculation in a sentence, for the tooltip. */
+function fightTip(m, r) {
+  const bits = [];
+  bits.push(`You: ${Math.round(r.perRound)} damage a round against its ` +
+            `${(m.hp || 0).toLocaleString()} hp` +
+            (m.regen ? ` (+${m.regen} regenerated every ${MOB_REGEN_ROUNDS} rounds)` : '') +
+            (r.endless ? ' — never enough' : ` = ${round1(r.rtk)} rounds to kill.`));
+  const f = theFighter();
+  bits.push(`It: ${Math.round(r.incoming)} a round` +
+            (r.modelled ? ` over ${round1(r.attacks)} attacks` : ' (its own average — no attack table)') +
+            (r.proc > 0.5 ? `, ${Math.round(r.proc)} of it spells thrown on a hit` : '') +
+            ` against your ${f.hp} hp` +
+            (r.rtd ? ` = ${round1(r.rtd)} rounds to kill you.` : ' — it cannot hurt you.'));
+  bits.push(r.endless ? 'No chance.' : `${r.win}% chance of winning.`);
+  return bits.join('\n');
+}
+
+/* The fight results are asked for a whole table at a time, so the character is
+ * worked out once and thrown away when anything about them changes. */
+let fighterCache = null;
+const theFighter = () => (fighterCache || (fighterCache = fighterFromChar()));
+const fightCache = new Map();
+const forgetFighter = () => { fighterCache = null; fightCache.clear(); };
+function fightWith(m) {
+  if (!m) return null;
+  const f = theFighter();
+  if (!f.known) return null;
+  if (!fightCache.has(m.n)) fightCache.set(m.n, fightVs(f, m));
+  return fightCache.get(m.n);
+}
+
 
 function coinsToCopper(c) {
   let t = 0;
@@ -537,14 +742,37 @@ function dropTooltip(it) {
     const m = monByNum.get(mnum);
     if (!m) return null;
     const where = monLocText(m);
+    // A drop chance is only half the answer. The other half is whether you can
+    // take the thing carrying it, so every dropper is priced as a fight too.
+    const r = fightWith(m);
     return `- ${m.name || 'Monster #' + m.n} (${pct}%)` +
            (m.exp ? `, ${m.exp.toLocaleString()} exp` : '') +
            (m.hp ? `, ${m.hp.toLocaleString()} hp` : '') +
            (m.inGame ? '' : ', not in game') +
+           (r ? `\n    ${winWords(r)}` : '') +
            (where ? `\n    ${where}` : '\n    location unknown');
   }).filter(Boolean);
   if (!rows.length) return '';
   return `Dropped by ${rows.length} monster${rows.length > 1 ? 's' : ''}:\n` + rows.join('\n');
+}
+
+/* How a fight reads in one line. */
+const winWords = r => r.endless
+  ? 'you cannot kill it'
+  : `${r.win}% chance of winning — ${round1(r.rtk)} rounds to kill it, ` +
+    (r.rtd ? `${round1(r.rtd)} for it to kill you` : 'it cannot hurt you');
+
+/* The best fight among everything that drops an item: the one worth hunting is
+ * not always the likeliest drop. */
+function bestKill(it) {
+  let best = null;
+  for (const [mnum, pct] of (it && it.drop) || []) {
+    const m = monByNum.get(mnum);
+    const r = m && fightWith(m);
+    if (!r) continue;
+    if (!best || r.win > best.r.win) best = { mon: m, pct, r };
+  }
+  return best;
 }
 
 /* ---------------------------------------------------------- eligibility */
@@ -927,6 +1155,7 @@ function candidatePool(mode, opt) {
 }
 
 function optimize(w, opt) {
+  forgetFighter();
   const c = clsByNum.get(S.cls);
   const race = D.races.find(r => r.n === S.race);
   WCTX.combat = c ? c.combat : 0;
@@ -1118,6 +1347,7 @@ function parseChar(text) {
   S.paste = text;          // kept with the character so a switch does not lose it
   S.unmatched = [];
   S.equipped = {}; S.carried = [];
+  S.stat = {};             // the defensive numbers the game itself reports
 
   const lines = text.split(/\r?\n/).map(l => l.replace(/\s+$/, ''));
 
@@ -1130,9 +1360,11 @@ function parseChar(text) {
   while ((m = two.exec(text))) {
     const k = m[1].toLowerCase(), a = +m[2], b = +m[3];
     found.fields++;
-    if (k === 'armour class') { found.ac = a; found.dr = b; }
-    else if (k === 'hits') found.hp = b;
-    else if (k === 'mana') found.mana = b;
+    // The game's own numbers beat anything we can derive, so keep them: a
+    // fight is modelled against the character as the game sees it.
+    if (k === 'armour class') { found.ac = S.stat.ac = a; found.dr = S.stat.dr = b; }
+    else if (k === 'hits') found.hp = S.stat.hp = b;
+    else if (k === 'mana') found.mana = S.stat.mana = b;
     else if (k === 'encumbrance') S.parsedEnc = [a, b];
   }
   while ((m = one.exec(text))) {
@@ -1146,6 +1378,7 @@ function parseChar(text) {
     else if (k === 'health') S.base.hea = v;
     else if (k === 'charm') S.base.cha = v;
     else if (k === 'spellcasting') S.sc = v;
+    else if (k === 'magicres') S.stat.mr = v;
   }
   while ((m = word.exec(text))) {
     const k = m[1].toLowerCase(), v = m[2].trim();
@@ -1877,6 +2110,7 @@ function renderSpells() {
  * costs nothing; what it buys is damage columns that describe the character
  * rather than a generic level-1 body. */
 function ctxFromChar() {
+  forgetFighter();
   const c = clsByNum.get(S.cls);
   const race = D.races.find(r => r.n === S.race);
   const { t, enc } = totalsOf(Object.values(S.equipped));
@@ -2127,6 +2361,29 @@ function sourceInto(td, it) {
       dropTooltip(it), () => goToMonster(best.mon));
     a.classList.add('src', 'drop');
     td.append(a);
+    // Recommending a drop without saying whether you can take the thing that
+    // carries it is half an answer, so the odds ride along with the name.
+    const kill = fightWith(best.mon);
+    if (kill) {
+      sep();
+      const w = el('span', 'win ' + winClass(kill.win),
+                   kill.endless ? 'no kill' : `${kill.win}% kill`);
+      w.title = fightTip(best.mon, kill);
+      td.append(w);
+      // The likeliest drop is not always the one to go for: something else may
+      // carry it half as often and be a fight you actually survive.
+      const easier = bestKill(it);
+      if (easier && easier.mon !== best.mon && easier.r.win > kill.win + 10) {
+        sep();
+        const alt = xref(`${easier.mon.name} ${easier.pct}%`,
+          `easier — ${winWords(easier.r)}`, () => goToMonster(easier.mon));
+        alt.classList.add('src', 'drop');
+        td.append(alt);
+        const aw = el('span', 'win ' + winClass(easier.r.win), ` ${easier.r.win}% kill`);
+        aw.title = fightTip(easier.mon, easier.r);
+        td.append(aw);
+      }
+    }
     if (drops.length > 1) {
       sep();
       td.append(xref(`+${drops.length - 1} more`, 'every monster that drops it',
@@ -2571,6 +2828,7 @@ function dropsByMonster() {
 }
 
 function renderMonsters() {
+  const ctx = ctxFromChar();
   const drops = dropsByMonster();
   const q = $('#m-q').value.trim().toLowerCase();
   const mp = $('#m-map').value;
@@ -2587,8 +2845,12 @@ function renderMonsters() {
   }
 
   const located = list.filter(m => m.maps && m.maps.length).length;
+  const f = theFighter();
   $('#m-note').textContent =
-    `${list.length} monster${list.length === 1 ? '' : 's'} · ${located} located`;
+    `${list.length} monster${list.length === 1 ? '' : 's'} · ${located} located · ` +
+    (f.known ? `${charNote(ctx)} · ${f.hp} hp, AC ${f.ac}/${f.dr}, accuracy ${f.accy}` +
+               (f.fromPaste ? '' : ' (average roll)')
+             : 'no character with a weapon — set one to see the fight');
 
   const box = $('#monsters'); box.innerHTML = '';
   if (!list.length) { box.append(el('div', 'empty', 'No monsters match.')); return; }
@@ -2658,6 +2920,33 @@ function renderMonsters() {
             'monsters here', () => goToRegion(n)));
         });
         if (m.room) td.append(document.createTextNode(' — ' + m.room));
+        return td;
+      } },
+    // What the fight actually looks like. The character is fixed, so these two
+    // columns sort the whole bestiary by "what can I take" -- which is the
+    // question behind every drop in the last column.
+    { h: 'You hit', cls: 'num', dir: -1, key: m => (fightWith(m) || {}).hit ?? -1,
+      cell: m => {
+        const td = el('td', 'num');
+        const r = fightWith(m);
+        if (!r) { td.append(el('span', 'imp-none', '—')); return td; }
+        td.append(el('div', null, `${r.hit}%`));
+        td.append(el('div', 'imp-none', `${Math.round(r.perRound)}/rd`));
+        td.title = `${r.hit}% of swings get past AC ${m.ac || 0}` +
+          (r.dodged ? `, then ${r.dodged}% of those are dodged` : '') +
+          (m.dr ? `; damage resistance ${m.dr} comes off every hit that lands` : '') +
+          `. ${Math.round(r.perRound)} damage a round over ${fightRounds} rounds.`;
+        return td;
+      } },
+    { h: 'Win', cls: 'num', dir: -1, key: m => (fightWith(m) || {}).win ?? -1,
+      cell: m => {
+        const td = el('td', 'num');
+        const r = fightWith(m);
+        if (!r) { td.append(el('span', 'imp-none', '—')); return td; }
+        td.append(el('div', 'win ' + winClass(r.win), `${r.win}%`));
+        td.append(el('div', 'imp-none', r.endless ? 'cannot kill it'
+          : `${round1(r.rtk)} vs ${r.rtd ? round1(r.rtd) : '∞'} rd`));
+        td.title = fightTip(m, r);
         return td;
       } },
     { h: 'Drops', dir: -1, key: m => loot(m).length,

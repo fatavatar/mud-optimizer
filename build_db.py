@@ -15,6 +15,12 @@ from access_parser import AccessParser
 
 # ---------------------------------------------------------------- enums
 
+# modMMudFunc.GetMonAttackTypeEnum / GetMonTypeEnum / GetMonAlignmentEnum
+MON_ATT_TYPES = {1: "Normal", 2: "Spell", 3: "Rob"}
+MON_TYPES = ["Solo", "Leader", "Follower", "Stationary"]
+MON_ALIGNS = ["Good", "Evil", "Chaotic Evil", "Neutral",
+              "Lawful Good", "Neutral Evil", "Lawful Evil"]
+
 # Items.Worn -> equipment slot index (frmMain.InvenAddEquip)
 WORN_TO_SLOT = {
     0: None,  # "Nowhere"
@@ -871,6 +877,23 @@ def main():
     # Every monster is exported, not just the ones carrying loot: the Monsters
     # tab is a bestiary, and "what else is in this room" is exactly the question
     # you have when a drop is 2%. `wanted_mons` still marks the droppers.
+    #
+    # The whole row goes out now, not the handful of columns a bestiary needs.
+    # What the page wants to answer is "can I kill this", and that question is
+    # settled by the parts nobody looks at: the monster's damage resistance, the
+    # accuracy of each of its attacks, how much energy each one costs, and how
+    # much energy it has in a round.
+    att_names, att_name_id = [], {}
+
+    def att_name(sname):
+        sname = str(sname or "").strip()
+        if not sname or sname.lower() == "unknown":
+            return -1
+        if sname not in att_name_id:
+            att_name_id[sname] = len(att_names)
+            att_names.append(sname)
+        return att_name_id[sname]
+
     monsters = []
     for i in range(mrows):
         mnum = int(num(mtab["Number"][i]))
@@ -918,6 +941,69 @@ def main():
             m["undead"] = True
         if num(mtab["MagicRes"][i]) == 0:
             m.pop("mr")
+
+        # What it takes to fight it. `energy` divided by an attack's `AttEnergy`
+        # is how often that attack comes round -- an orc captain has 1000 energy
+        # and a 260-energy swing, so it swings 3.85 times a round, which is
+        # exactly how the table's own AvgDmg of 54 falls out of an 8-16 hit.
+        for key, col in (("dr", "DamageResist"), ("bs", "BSDefense"),
+                         ("align", "Align"), ("mtype", "Type"),
+                         ("charm", "CharmLVL"), ("follow", "Follow%"),
+                         ("regen", "HPRegen"), ("regenT", "RegenTime"),
+                         ("limit", "GameLimit")):
+            v = int(num(mtab[col][i]))
+            if v:
+                m[key] = v
+        energy = int(num(mtab["Energy"][i]))
+        m["energy"] = energy or 1000
+
+        # Coin drops, in the currency order the rest of the tool uses.
+        coins = [int(num(mtab[c][i])) for c in ("C", "S", "G", "P", "R")]
+        if any(coins):
+            m["coins"] = coins
+
+        # One row per attack: [type, accuracy, chance, min, max, energy, name,
+        # spell on hit]. `AttTrue%` is the real chance of that attack, already
+        # unwound from the roll-under thresholds `Att%` stores.
+        atk = []
+        for k in range(5):
+            atype = int(num(mtab[f"AttType-{k}"][i]))
+            if atype not in (1, 2, 3):
+                continue
+            pct = round(float(num(mtab[f"AttTrue%-{k}"][i])), 1)
+            if pct <= 0:
+                continue
+            amin = int(num(mtab[f"AttMin-{k}"][i]))
+            amax = int(num(mtab[f"AttMax-{k}"][i]))
+            if atype == 1 and amin > amax:
+                amin, amax = amax, amin
+            atk.append([atype, int(num(mtab[f"AttAcc-{k}"][i])), pct,
+                        amin, amax, int(num(mtab[f"AttEnergy-{k}"][i])),
+                        att_name(mtab[f"AttName-{k}"][i]),
+                        int(num(mtab[f"AttHitSpell-{k}"][i]))])
+        if atk:
+            m["att"] = atk
+
+        # Spells it throws between swings, and the ones it casts on dying or on
+        # being created.
+        mid = []
+        for k in range(5):
+            sp = int(num(mtab[f"MidSpell-{k}"][i]))
+            if sp:
+                mid.append([sp, int(num(mtab[f"MidSpell%-{k}"][i])),
+                            int(num(mtab[f"MidSpellLVL-{k}"][i]))])
+        if mid:
+            m["mid"] = mid
+        for key, col in (("death", "DeathSpell"), ("create", "CreateSpell")):
+            v = int(num(mtab[col][i]))
+            if v:
+                m[key] = v
+
+        abils = [(int(num(mtab[f"Abil-{k}"][i])), int(num(mtab[f"AbilVal-{k}"][i])))
+                 for k in range(10) if num(mtab[f"Abil-{k}"][i])]
+        if abils:
+            m["abils"] = abils
+
         monsters.append(m)
     monsters.sort(key=lambda m: m["n"])
 
@@ -1045,6 +1131,10 @@ def main():
         "shops": shops,
         "maps": maps,
         "monsters": monsters,
+        "monAttNames": att_names,
+        "monAttTypes": MON_ATT_TYPES,
+        "monTypes": MON_TYPES,
+        "monAligns": MON_ALIGNS,
         "spells": spells,
         "spellNames": {str(k): v for k, v in sorted(spell_names.items())},
         "castable": {str(k): v for k, v in castable.items() if v},

@@ -32,6 +32,8 @@ vm.runInContext(
   'passesRestrictions,isSundry,dropsByMonster,stockByShop,ctxFromChar,itemTags,spellName,'+
   'sortRows,sourceOrder,sortState,itemTab,hidesItem,FROM_REF,'+
   'getRounds:()=>fightRounds,damageMargins,DAMAGE_MODELLED,weaponThroughput,' +
+  'hitPct,dodgePct,landsVs,resistDamage,calcMR,calcMaxHP,monDodge,'+
+  'damageVs,intakeFrom,fightVs,fighterFromChar,fightWith,bestKill,forgetFighter,'+
   'MV,drawMap,indexMap};', ctx);
 
 const X = ctx.__X;
@@ -1069,6 +1071,97 @@ for (const it of D.items) {
 ok(shopRefs > 1000 && badShops.length > 0,
    'some shop references point outside the shop table and stay plain text',
    `${badShops.length} of ${shopRefs}`);
+
+/* ------------------------------------------------------- fighting a monster */
+section('Fighting a monster');
+
+// modMMudFunc.CalculateAttackDefense: the miss rate is (AC*AC)/100 over
+// (Accy*Accy)/140, clamped to a floor of 8% and a ceiling of 99%.
+eq(X.hitPct(110, 0), 99, 'an unarmoured target is hit as often as anything can be');
+eq(X.hitPct(110, 60), 59, 'accuracy 110 against armour class 60');
+eq(X.hitPct(110, 9999), 8, 'armour never takes you below the 8% floor');
+eq(X.hitPct(1, 60), 8, '...and neither does having no accuracy at all');
+// CalcDodgeVSAccuracy, stock: (dodge * 10) \ (accy \ 8), capped at 95.
+eq(X.dodgePct(0, 110), 0, 'nothing dodges without a dodge score');
+eq(X.dodgePct(18, 110), 13, 'dodge 18 against accuracy 110');
+eq(X.dodgePct(400, 110), 95, 'dodge is capped at 95%');
+// CalculateResistDamage
+eq(X.resistDamage(100, 50), 100, 'magic resistance of 50 is the break-even point');
+eq(X.resistDamage(100, 90), 80, 'resistance over 51 cuts a damage spell');
+eq(X.resistDamage(100, 40), 110, '...and under 50 makes it worse');
+eq(X.calcMR(30, 28, 0), 28, 'CalcMR from Intellect and Willpower');
+eq(X.calcMaxHP(0, 24, 51, 6), 170, 'CalcMaxHP before any levelling roll');
+
+// The strongest check on both the export and the model: rebuild each monster's
+// damage from its raw attack rows -- how often each attack comes round, how much
+// it does -- and compare against the AvgDmg the database states for itself.
+// Nothing links the two, so agreeing is evidence the attack table was read right.
+{
+  const naked = { ac: 0, dodge: 0, dr: 0, mr: 50 };
+  let n = 0, close = 0, err = 0;
+  for (const m of D.monsters) {
+    if (!m.att || !m.avgDmg || m.att.some(a => a[0] !== 1)) continue;
+    const got = X.intakeFrom(naked, m).perRound;
+    const e = Math.abs(got - m.avgDmg) / m.avgDmg;
+    n++; err += e; if (e <= 0.1) close++;
+  }
+  ok(n > 500, 'most monsters carry a full attack table', `${n} physical-only`);
+  ok(100 * close / n > 90,
+     'and rebuilding their damage from it lands on the average the table states',
+     `${close} of ${n} within 10%, mean error ${(100 * err / n).toFixed(1)}%`);
+}
+
+// The export itself.
+{
+  const withAtt = D.monsters.filter(m => m.att && m.att.length);
+  ok(withAtt.length > 900, 'the attack table is exported for almost every monster',
+     `${withAtt.length} of ${D.monsters.length}`);
+  ok(D.monsters.filter(m => m.dr).length > 900, 'so is damage resistance');
+  ok(D.monsters.filter(m => m.coins).length > 300, 'and what they carry in coin');
+  // AttTrue% is stored to one decimal, so 45 monsters sum to 100.1.
+  ok(withAtt.every(m => m.att.reduce((a, x) => a + x[2], 0) <= 100.2),
+     'no monster attacks more often than every attempt');
+  ok(withAtt.every(m => m.att.every(a => a[6] < D.monAttNames.length)),
+     'every attack names itself out of the shared list');
+  const oc = D.monsters.find(m => m.name === 'orc captain' && m.att);
+  ok(oc && oc.att.length === 2 && oc.att[0][1] === 120 && oc.att[0][3] === 8 &&
+     oc.att[0][5] === 260 && oc.energy === 1000,
+     'the orc captain swings twice for 8-16 and 20-50, 260 energy a swing');
+}
+
+// End to end, for the character the rest of these tests use.
+{
+  const saved = X.snapshot();
+  X.parseChar(paste);
+  X.ctxFromChar();
+  const f = X.fighterFromChar();
+  ok(f.known, 'a pasted character with a weapon can be put in a fight');
+  eq(f.hp, 312, 'and fights on the hit points the game reported, not a guess');
+  eq(f.ac, 148, 'on the armour class it reported too');
+  const of_ = name => D.monsters.find(m => m.name === name && m.att);
+  const rat = X.fightVs(f, of_('giant rat'));
+  eq(rat.win, 100, 'a level 24 warrior cannot lose to a giant rat');
+  ok(rat.rtk <= 2, '...and kills it inside two rounds', String(rat.rtk));
+  const fiend = X.fightVs(f, of_('Devil Fiend Malivek'));
+  eq(fiend.win, 0, 'and cannot beat a devil fiend with 4,500 hit points');
+  ok(fiend.endless, '...it never gets through, so the rounds are meaningless');
+  ok(fiend.rtd > 0 && fiend.rtd < 10, 'while the fiend kills them in under ten rounds',
+     fiend.rtd.toFixed(1));
+
+  // The thing the drop columns are for: the likeliest source is not always the
+  // one to hunt.
+  const chitin = D.items.find(i => i.name === 'piece of black chitin');
+  const easier = X.bestKill(chitin);
+  ok(chitin && chitin.drop.length > 1 && easier,
+     'an item with several droppers offers a choice of fight');
+  const likeliest = X.bestDrop(chitin);
+  ok(easier.mon !== likeliest.mon && easier.r.win > X.fightWith(likeliest.mon).win,
+     'and the easier kill is not the likeliest drop',
+     `${likeliest.mon.name} ${likeliest.pct}% at ${X.fightWith(likeliest.mon).win}% ` +
+     `vs ${easier.mon.name} ${easier.pct}% at ${easier.r.win}%`);
+  X.restore(saved);
+  X.ctxFromChar();
+}
 
 /* ------------------------------------------------------------------ maps */
 section('The maps');
