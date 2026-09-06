@@ -339,14 +339,13 @@ def parse_exit(v):
     return int(m.group(1)), int(m.group(2)), v.strip()
 
 
-def layout_map(rooms, adj, nudge=1):
+def layout_map(rooms, adj, nudge=0):
     """Turn the room graph into cells.
 
     Every room is placed exactly where its neighbour's exit says it goes. When
     that cell is already taken the room is left for later, because another of
-    its exits may still place it correctly; only when nothing can is it allowed
-    a nudge of one cell, and only when that fails too does it start a *new
-    area*.
+    its exits may still place it correctly; and when nothing can place it, it
+    starts a *new area* rather than being put somewhere approximate.
 
     That last part is the whole point. The world is not flat -- walk a loop that
     does not close and two rooms want the same cell -- and the obvious repair,
@@ -401,8 +400,9 @@ def layout_map(rooms, adj, nudge=1):
                     break
             if not again:
                 break
-        # one cell of give, so a single awkward room does not become an area of
-        # its own
+        # A cell of give, off by default: a room a cell away from where its exit
+        # says it is reads as a mistake, and the mistakes compound along a
+        # corridor until the map is soup.
         if nudge:
             moving = True
             while moving:
@@ -477,20 +477,36 @@ def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_nam
         for i in idxs:
             rows[int(num(rt["Room Number"][i]))] = i
 
-        # planar adjacency, this map only: up, down and cross-map exits are
-        # links you click, not steps on the grid
+        # Room names read "Slum Street, by the well", so the part before the
+        # comma is the place the room is in.
+        place = {rn: str(rt["Name"][i] or "").split(",")[0].strip().lower()
+                 for rn, i in rows.items()}
+
+        # Planar adjacency, this map only: up, down and cross-map exits are
+        # links you click, not steps on the grid.
+        #
+        # A diagonal only lays out ground inside one place. Diagonals are how a
+        # wood or a cave system is threaded together, so throwing them away
+        # would shatter Darkwood Forest into four hundred pieces -- but a
+        # diagonal that leaves a place is what welds the wood onto the town
+        # beside it, and then the two are drawn through each other. Between
+        # places, only a plain compass step lays out ground; anything else
+        # becomes a different space you click into, the same as a stair.
         adj = defaultdict(list)
         for rn, i in rows.items():
             for d, dx, dy in PLANAR:
                 ex = parse_exit(rt[d][i])
-                if ex and ex[0] == mp and ex[1] in rows:
-                    adj[rn].append((ex[1], dx, dy))
-                    adj[ex[1]].append((rn, -dx, -dy))
+                if not (ex and ex[0] == mp and ex[1] in rows):
+                    continue
+                if len(d) == 2 and place[rn] != place[ex[1]]:
+                    continue
+                adj[rn].append((ex[1], dx, dy))
+                adj[ex[1]].append((rn, -dx, -dy))
 
         order = sorted(rows)
         for rn in adj:
             adj[rn] = sorted(set(adj[rn]))
-        placed_raw, area_pos, nudged = layout_map(order, adj)
+        placed_raw, area_pos, nudged = layout_map(order, adj, nudge=0)
 
         boxes, raw = [], []
         for pos in area_pos:
@@ -518,18 +534,20 @@ def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_nam
             else:
                 names = Counter(str(rt["Name"][rows[r]] or "").split(",")[0].strip()
                                 for r in pos)
-                top = names.most_common(2)
+                top = names.most_common()
                 label = top[0][0] if top else ""
-                # A big area is often several places at once -- the town, the
-                # forest behind it and the graveyard beside them -- so name it
-                # after the two biggest rather than pretending it is one place.
+                # A big area is often several places at once -- a town is a
+                # dozen streets -- so when no one name covers it, name it after
+                # the two biggest. The second has to say something the first
+                # does not: "Slum Street / Street" reads like a bug.
                 if len(top) > 1 and top[0][1] < 0.4 * len(pos):
-                    label = f"{top[0][0]} / {top[1][0]}"
-            exact = sum(1 for r in pos for nb, dx, dy in adj.get(r, ())
-                        if nb in pos and pos[nb] == (pos[r][0] + dx, pos[r][1] + dy)) // 2
+                    other = next((n for n, _ in top[1:]
+                                  if n.lower() not in label.lower()
+                                  and label.lower() not in n.lower()), None)
+                    if other:
+                        label = f"{label} / {other}"
             areas.append({"label": label or f"area {ai + 1}", "x": ox, "y": oy,
-                          "w": w, "h": h, "rooms": len(pos),
-                          "seed": min(pos), "exact": exact})
+                          "w": w, "h": h, "rooms": len(pos), "seed": min(pos)})
 
         # The map is named after its biggest area, before the areas that share a
         # name are numbered -- "Dragon's Teeth Hills", not "Dragon's Teeth Hills 1".
@@ -624,10 +642,17 @@ def export_maps(db, outdir, monsters_by_num, shops_by_num, spell_names, item_nam
         # How many exits could be drawn as a neat one-cell step, out of the
         # planar ones inside this map -- a loop that does not close on a grid
         # cannot be, and is drawn as a stretched line instead.
-        exact = sum(a["exact"] for a in areas)
-        planar = sum(1 for e in exits_out if e[1] < 8 and e[2] == mp)
-        seams = sum(1 for e in exits_out if e[1] < 8 and e[2] == mp and e[3] in placed
-                    and placed[e[3]][2] != placed[e[0]][2])
+        planar = seams = exact = 0
+        for rn, di, tm, tr, _ in exits_out:
+            if di >= 8 or tm != mp or tr not in placed:
+                continue
+            planar += 1
+            ax, ay, aa = placed[rn]
+            bx, by, ba = placed[tr]
+            if aa != ba:
+                seams += 1
+            elif (bx - ax, by - ay) == PLANAR[di][1:]:
+                exact += 1
 
         w = max((r[2] for r in rooms_out), default=0) + 1
         h = max((r[3] for r in rooms_out), default=0) + 1
@@ -1059,7 +1084,7 @@ def main():
     planar = sum(m["planar"] for m in map_index)
     seams = sum(m["seams"] for m in map_index)
     print(f"  maps={len(map_index)}  rooms={laid}  areas={sum(m['areas'] for m in map_index)}  "
-          f"({100 * 2 * exact / max(1, planar - seams):.1f}% of exits inside an area land one cell "
+          f"({100 * exact / max(1, planar - seams):.1f}% of exits inside an area land one cell "
           f"away in their own direction; {seams} cross between areas)")
     print(f"  wrote data/maps/*.js ({map_kb:.0f} KB across {len(map_files)} files)")
     print(f"  items={len(items)}  classes={len(classes)}  races={len(races)}  shops={len(shops)}")

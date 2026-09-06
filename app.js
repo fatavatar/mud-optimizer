@@ -2887,14 +2887,18 @@ function indexMap(m) {
 const roomName = r => MV.data.names[r[R_NAME]] || 'room ' + r[R_NUM];
 const exitsOf = num => MV.out.get(num) || [];
 
-/* Where a planar exit leads: the same area, another area on this map, or
- * another map. Only the first can be drawn as a line -- the rest would be a
- * line across ground that has nothing to do with them. */
+/* Where a planar exit leads. It is drawn as a line only when it is a real step
+ * across this patch of ground: the room next door, one cell away, in the
+ * direction you walk. Anything else -- another area, another map, or a room
+ * that ended up somewhere else on the plane -- would be a line across ground it
+ * has nothing to do with, so it becomes a marker on the room instead. */
 function exitLeaves(r, e) {
-  if (!DIR_STEP[MAP_DIRS[e[1]]]) return false;      // up and down are not lines
+  const step = DIR_STEP[MAP_DIRS[e[1]]];
+  if (!step) return false;                          // up and down are not lines
   if (e[2] !== MV.n) return true;
   const t = MV.byNum.get(e[3]);
-  return !t || t[R_AREA] !== r[R_AREA];
+  if (!t || t[R_AREA] !== r[R_AREA]) return true;
+  return t[R_X] !== r[R_X] + step[0] || t[R_Y] !== r[R_Y] + step[1];
 }
 const leavingExits = r => exitsOf(r[R_NUM]).filter(e => exitLeaves(r, e));
 const mapLabel = mi => `map ${mi.n} — ${mi.label} (${mi.rooms.toLocaleString()} rooms)`;
@@ -3007,8 +3011,8 @@ function drawMap() {
     }
   }
 
-  // Exits first, so rooms sit on top of them -- but only the ones that stay
-  // inside this area. An exit that leaves it would be a line drawn across
+  // Exits first, so rooms sit on top of them -- but only the ones that are a
+  // step to the room next door. Anything longer would be a line drawn across
   // unrelated ground, which is exactly the soup the layout exists to avoid, so
   // those are markers on the room instead.
   ctx.strokeStyle = p.line2;
@@ -3018,10 +3022,8 @@ function drawMap() {
     if (!inView(r)) continue;
     const cx = sx(r[R_X] + 0.5), cy = sy(r[R_Y] + 0.5);
     for (const e of exitsOf(r[R_NUM])) {
-      const dir = MAP_DIRS[e[1]];
-      if (!DIR_STEP[dir] || e[2] !== m.n) continue;
+      if (!DIR_STEP[MAP_DIRS[e[1]]] || e[2] !== m.n || exitLeaves(r, e)) continue;
       const t = MV.byNum.get(e[3]);
-      if (!t || t[R_AREA] !== r[R_AREA]) continue;
       // one line per pair: draw it from the lower room number only
       if (t[R_NUM] < r[R_NUM] && exitsOf(t[R_NUM]).some(x => x[2] === m.n && x[3] === r[R_NUM])) continue;
       ctx.moveTo(cx, cy);

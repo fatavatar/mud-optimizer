@@ -138,33 +138,46 @@ places end up drawn through each other. Measured on map 1, 1,911 of the 2,151
 rooms outside Darkwood Forest were sitting inside the forest's own bounding box
 — the sewers drawn through the streets above them, the town through the trees.
 
-So a room is only ever placed exactly where a neighbour's exit says it goes. If
-that cell is taken it is left for later, because another of its exits may still
-place it correctly; if nothing can, it is allowed a nudge of one cell; and if
-that fails too it **starts a new area** rather than being shoved somewhere free.
-Tearing keeps every area internally true, and the exits between areas become
-links you click, exactly like a stair. That took the same measurement from 1,911
-rooms out of place to 297, and the sewers are now an area of their own.
+So a room is only ever placed exactly where a neighbour's exit says it goes, and
+when nothing can place it there it **starts a new area** rather than being put
+somewhere approximate. Tearing keeps every area internally true, and the exits
+between areas become links you click, exactly like a stair.
 
-| | |
-| --- | --- |
-| Rooms | 26,694 across 17 maps |
-| Areas | 1,037 — pieces that cannot share a plane, packed side by side |
-| Exits inside an area | **98.6%** land exactly one cell away in their own direction |
-| Exits between areas | 406 in the whole world, drawn as marks you click |
-| Rooms that sit exactly where a neighbour puts them | 99.7% |
+**A diagonal only lays out ground inside one place.** Room names read *Slum
+Street, by the well*, so the part before the comma says which place a room is
+in. Between two places, only a plain compass step — north, south, east, west —
+puts the next room on the same plane; a diagonal that crosses from one place to
+another becomes a link instead.
 
-The 1.4% that remain stretched are loops the grid cannot close. They are drawn
-as a longer line rather than dropped, so the connection is still true even where
-the geometry is not.
+That sounds fussy and it is the difference between a map and a mess. Diagonals
+are how a wood or a cave system is threaded together — Darkwood Forest is 926
+diagonal steps against 761 compass ones — so simply refusing to lay out
+diagonals shatters the forest into 444 fragments. But it is also a single
+diagonal leaving the trees that welds the whole forest onto the town beside it,
+and once they share a plane they are drawn through each other. Restricting the
+rule to steps that *leave a place* keeps the wood whole and the town separate.
+
+| | before | after |
+| --- | --- | --- |
+| Map 1's biggest area | 1,650 rooms of 26 places | 909 rooms, **89% Darkwood Forest** |
+| The town of Silvermere | inside that same area | its own 634-room area |
+| Exits inside an area landing one cell away | 98.6% | **98.7%** of 58,895 |
+| Areas world-wide | 1,037 | 1,396 |
+| Exits between areas | 406 | 1,126, drawn as marks you click |
+| Rooms that sit exactly where a neighbour puts them | 99.7% | **100%** |
+
+The 779 exits that remain stretched are loops the grid cannot close. They are
+drawn as a longer line rather than dropped, so the connection is still true even
+where the geometry is not.
 
 **Up and down get no cell.** They lead somewhere that would sit on top of what
 is already drawn, so they are wedges on the room — ▲ above, ▼ below — that you
-click to follow. An exit into another area, or into another map, is a nub on the
-room's edge facing the way it goes; clicking it takes you there and the area
-picker follows. Those are the only exits not drawn as lines, because a line to
-somewhere packed elsewhere on the plane would cross ground it has nothing to do
-with — which is the soup again. Every exit is also listed in the room panel with whatever the
+click to follow. An exit into another area, into another map, or to a room that
+ended up somewhere else on the plane is a nub on the room's edge facing the way
+it goes; clicking it takes you there and the area picker follows. A line is only
+ever drawn to the room next door, because a line to somewhere packed elsewhere
+on the plane would cross ground it has nothing to do with — which is the soup
+again. Every exit is also listed in the room panel with whatever the
 database says about it: *(Door)*, *(Key: 1416 [or 101 picklocks])*, *(Trap, 40
 damage)*, *(Hidden/Searchable)*, *(Toll: 500)*, *(Level: 0 to 3)*.
 

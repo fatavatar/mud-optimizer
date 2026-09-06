@@ -1127,7 +1127,7 @@ for (const mi of D.mapIndex) {
     } else stretched++;
   }
   // A room in a multi-room area should sit at an exact offset from at least one
-  // of its neighbours; the nudge allows a few not to.
+  // of its neighbours.
   const crowd = new Set(m.areas.map((a, i) => (a.rooms > 1 ? i : -1)));
   const inCrowd = m.rooms.filter(r => crowd.has(r[R_AREA]));
   exactNeighbour.push([inCrowd.filter(r => happy.has(r[R_NUM])).length, inCrowd.length]);
@@ -1135,19 +1135,24 @@ for (const mi of D.mapIndex) {
 const cleanPct = 100 * clean / (clean + stretched);
 ok(cleanPct > 95, 'inside an area, exits land one cell away in their own direction',
    `${cleanPct.toFixed(1)}% of ${clean + stretched}`);
-ok(seams > 100 && seams < 1000, 'the exits that cannot are area seams, and there are few',
-   String(seams));
+// Seams are the price of never shoving a room: an exit the grid cannot honour
+// is a link between two areas rather than a lie about where a room is. They
+// should stay a small fraction of the walking you can actually draw.
+ok(seams > 100 && seams < clean / 8, 'the exits that cannot are area seams, and there are few',
+   `${seams} against ${clean} drawn`);
 ok(stretched > 0, 'loops a grid cannot close are kept as stretched lines, not dropped',
    String(stretched));
+// Nothing is nudged any more, so this is exact rather than nearly: a room the
+// grid cannot place is torn into an area of its own, never left a cell off.
 const anchored = exactNeighbour.reduce((a, b) => [a[0] + b[0], a[1] + b[1]], [0, 0]);
-ok(100 * anchored[0] / anchored[1] > 95,
-   'and almost every room sits exactly where one of its neighbours puts it',
-   `${(100 * anchored[0] / anchored[1]).toFixed(1)}%`);
+eq(anchored[0], anchored[1],
+   'and every room sharing an area sits exactly where a neighbour puts it');
 
 // The bug this layout exists to fix: places drawn on top of each other. Map 1's
-// biggest area holds the forest, the labyrinth, the graveyard and the slums, and
-// each should keep to its own ground -- the sewers, which used to be drawn
-// through the streets, are now an area of their own.
+// biggest area used to hold the forest, the labyrinth, the graveyard and the
+// slums at once; it should now be one place with a fringe of the caves and
+// cottages that open off it, and the town, the sewers and the labyrinth should
+// each be somewhere else.
 {
   const m = MAPS[1];
   const big = m.areas.reduce((a, b, i) => (b.rooms > m.areas[a].rooms ? i : a), 0);
@@ -1159,21 +1164,17 @@ ok(100 * anchored[0] / anchored[1] > 95,
     byPlace.get(place).push(r);
   }
   const biggest = [...byPlace.entries()].sort((a, b) => b[1].length - a[1].length)[0];
-  const xs = biggest[1].map(r => r[R_X]), ys = biggest[1].map(r => r[R_Y]);
-  const box = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-  let inside = 0, other = 0;
-  for (const [place, rs] of byPlace) {
-    if (place === biggest[0]) continue;
-    for (const r of rs) {
-      other++;
-      if (r[R_X] >= box[0] && r[R_X] <= box[1] && r[R_Y] >= box[2] && r[R_Y] <= box[3]) inside++;
-    }
-  }
-  ok(100 * inside / other < 40,
-     `other places do not sprawl through ${biggest[0]}`,
-     `${inside} of ${other} rooms inside its box`);
-  ok(!m.areas[big].label.match(/Sewer/) && m.areas.some(a => /Sewer/.test(a.label)),
-     'and the sewers are an area of their own, not drawn through the town');
+  const share = 100 * biggest[1].length / m.areas[big].rooms;
+  ok(share > 75, `map 1's biggest area is one place, not several`,
+     `${biggest[0]} is ${share.toFixed(0)}% of its ${m.areas[big].rooms} rooms`);
+  const label = p => m.areas.findIndex(a => p.test(a.label));
+  const forest = label(/Darkwood/), town = label(/Slum Street/),
+        sewer = label(/Sewer/), maze = label(/Labyrinth/);
+  ok(forest >= 0 && town >= 0 && sewer >= 0 && maze >= 0,
+     'the forest, the town, the sewers and the labyrinth are all named areas');
+  ok(new Set([forest, town, sewer, maze]).size === 4,
+     'and none of them is drawn through another',
+     `forest ${forest}, town ${town}, sewers ${sewer}, labyrinth ${maze}`);
 }
 
 // Every exit has somewhere to go, on this map or another.
